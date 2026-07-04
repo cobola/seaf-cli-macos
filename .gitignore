@@ -1,0 +1,33 @@
+# Compiled binaries
+build/
+dist/
+package/
+
+# Source code (compiled separately)
+src/
+
+# Binary packages
+*.tar.gz
+*.sha256
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+
+# Autotools generated
+ltmain.sh
+autom4te.cache/
+aclocal.m4
+config.h
+config.status
+config.log
+libtool
+stamp-h1
+Makefile.in
+
+# Test logs
+*.log
+test-results/
