@@ -72,7 +72,7 @@ func loginWithConfig(rootDir string) error {
 	}
 	server := normalizeServerURL(cred.Server)
 	if err := validateToken(server, cred.Token); err != nil {
-		return fmt.Errorf("Token 验证失败: %w", err)
+		return fmt.Errorf("token 验证失败: %w", err)
 	}
 	cfg := config.NewConfig(rootDir)
 	if err := cfg.Load(); err != nil {
@@ -157,7 +157,7 @@ func loginWithWeb(rootDir string) error {
 		email := r.FormValue("email")
 		token := r.FormValue("token")
 		if server == "" || token == "" {
-			jsonError(w, "服务器地址和 Token 不能为空")
+			jsonError(w, "服务器地址和 token 不能为空")
 			return
 		}
 		server = normalizeServerURL(server)
@@ -203,6 +203,19 @@ func loginWithWeb(rootDir string) error {
 		} else {
 			jsonError(w, fmt.Sprintf("服务器响应: HTTP %d", resp.StatusCode))
 		}
+	})
+
+	mux.HandleFunc("/api/open-browser", func(w http.ResponseWriter, r *http.Request) {
+		server := normalizeServerURL(r.URL.Query().Get("server"))
+		if server == "" {
+			jsonError(w, "请先填写服务器地址")
+			return
+		}
+		if err := exec.Command("open", server).Start(); err != nil {
+			jsonError(w, fmt.Sprintf("打开浏览器失败: %s", err))
+			return
+		}
+		jsonOK(w, "已在浏览器中打开")
 	})
 
 	ln, err := openPort()
@@ -287,7 +300,7 @@ func validateToken(server, token string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Token 无效 (HTTP %d)", resp.StatusCode)
+		return fmt.Errorf("token 无效 (HTTP %d)", resp.StatusCode)
 	}
 	return nil
 }
@@ -332,25 +345,21 @@ body{font-family:"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;bac
 .field input{width:100%;padding:10px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:14px;outline:none;transition:border-color .2s}
 .field input:focus{border-color:#ff8800}
 .field .hint{font-size:11px;color:#bbb;margin-top:4px}
+.tabs{display:flex;border-bottom:1px solid #f0f0f0;margin-bottom:16px}
+.tab{flex:1;text-align:center;padding:10px 0;font-size:14px;color:#999;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
+.tab.active{color:#ff8800;border-bottom-color:#ff8800;font-weight:600}
+.tab:hover{color:#666}
 .login-btn{width:100%;padding:12px;background:#ff8800;color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .2s}
 .login-btn:hover{opacity:.9}
 .login-btn:disabled{background:#ccc;cursor:not-allowed}
-.sso-link{display:block;text-align:left;margin-top:16px;font-size:13px;color:#1677ff;cursor:pointer;text-decoration:none}
-.sso-link:hover{text-decoration:underline}
 .note{margin-top:12px;font-size:12px;color:#999;line-height:1.6}
 .note code{background:#f5f5f5;padding:2px 6px;border-radius:3px;font-size:11px}
 #status{margin-top:12px;padding:10px;border-radius:6px;font-size:13px;line-height:1.5;display:none}
 .s-ok{background:#f6ffed;color:#52c41a;border:1px solid #b7eb8f;display:block}
 .s-err{background:#fff2f0;color:#ff4d4f;border:1px solid #ffccc7;display:block}
 .s-load{background:#e6f7ff;color:#1677ff;border:1px solid #91d5ff;display:block}
-.divider{border:none;border-top:1px solid #f0f0f0;margin:20px 0}
-.manual-section{margin-top:8px}
-.manual-toggle{font-size:13px;color:#999;cursor:pointer;user-select:none}
-.manual-toggle:hover{color:#666}
-.manual-form{display:none;margin-top:12px}
-.manual-form .field{margin-bottom:12px}
-.manual-form button{width:100%;padding:10px;background:#ff8800;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer}
-.manual-form button:disabled{background:#ccc}
+.panel{display:none}
+.panel.active{display:block}
 </style>
 </head>
 <body>
@@ -360,44 +369,46 @@ body{font-family:"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;bac
     <div class="sub">连接到 Seafile 服务器</div>
   </div>
   <div class="form">
-    <!-- 主登录表单 -->
     <div class="field">
       <label>服务器地址</label>
       <input id="server" placeholder="例如：https://seacloud.cc 或 http://192.168.1.24:8000">
       <div class="hint">输入 Seafile 服务器 URL</div>
     </div>
-    <div class="field">
-      <label>邮箱 / 用户名</label>
-      <input id="username" placeholder="your@email.com">
-    </div>
-    <div class="field">
-      <label>密码</label>
-      <input id="password" type="password" placeholder="密码">
-    </div>
-    <button class="login-btn" id="loginBtn" onclick="doLogin()">登录</button>
 
-    <a class="sso-link" onclick="toggleSSO()">单点登录或 Token 登录</a>
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('password')">密码登录</div>
+      <div class="tab" onclick="switchTab('sso')">单点登录 / token</div>
+    </div>
 
-    <!-- SSO / 手动 Token 展开区 -->
-    <div id="ssoSection" style="display:none">
-      <hr class="divider">
-      <div class="manual-section">
-        <div class="manual-toggle" onclick="toggleManual()">▶ 手动输入 API Token（跳过网页登录）</div>
-        <div class="manual-form" id="manualForm">
-          <div class="field">
-            <label>API Token</label>
-            <input id="manualToken" placeholder="粘贴从网页设置中获取的 API Token">
-          </div>
-          <div class="field">
-            <label>用户（可选）</label>
-            <input id="manualEmail" placeholder="your@email.com">
-          </div>
-          <button id="manualBtn" onclick="doManualToken()">验证并登录</button>
-        </div>
+    <!-- 密码登录 -->
+    <div class="panel active" id="panel-password">
+      <div class="field">
+        <label>邮箱 / 用户名</label>
+        <input id="username" placeholder="your@email.com">
       </div>
-      <div class="note">
-        <strong>Token 获取方式：</strong>登录服务器网页 → 个人设置 → API 令牌 → 生成新令牌，复制粘贴到上方输入框
+      <div class="field">
+        <label>密码</label>
+        <input id="password" type="password" placeholder="密码">
       </div>
+      <button class="login-btn" id="loginBtn" onclick="doLogin()">登录</button>
+    </div>
+
+    <!-- SSO / Token 登录 -->
+    <div class="panel" id="panel-sso">
+      <div class="field">
+        <label>api token</label>
+        <input id="manualToken" placeholder="粘贴从网页设置中获取的 api token">
+        <div class="hint">登录服务器网页 → 个人设置 → api 令牌 → 生成新令牌</div>
+      </div>
+      <div class="field">
+        <label>邮箱（可选）</label>
+        <input id="manualEmail" placeholder="your@email.com">
+      </div>
+      <button class="login-btn" id="manualBtn" onclick="doManualToken()">验证并登录</button>
+      <div class="note" style="margin-top:16px">
+        <strong>单点登录？</strong>输入服务器地址后点击下方按钮，在浏览器中完成登录，获取 api token 后粘贴到上方
+      </div>
+      <button class="login-btn" style="background:#1677ff;margin-top:12px" onclick="openBrowser()">打开服务器登录页面</button>
     </div>
 
     <div id="status"></div>
@@ -411,16 +422,16 @@ body{font-family:"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;bac
 </div>
 
 <script>
-function toggleSSO(){
-  var s=document.getElementById('ssoSection');
-  s.style.display=s.style.display==='none'?'block':'none';
-}
-function toggleManual(){
-  var f=document.getElementById('manualForm');
-  var t=document.querySelector('.manual-toggle');
-  var show=f.style.display==='none';
-  f.style.display=show?'block':'none';
-  t.textContent=(show?'▼':'▶')+' 手动输入 API Token（跳过网页登录）';
+function switchTab(tab){
+  document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});
+  document.querySelectorAll('.panel').forEach(function(p){p.classList.remove('active')});
+  if(tab==='password'){
+    document.querySelectorAll('.tab')[0].classList.add('active');
+    document.getElementById('panel-password').classList.add('active');
+  }else{
+    document.querySelectorAll('.tab')[1].classList.add('active');
+    document.getElementById('panel-sso').classList.add('active');
+  }
 }
 function setStatus(id,cls,txt){
   var el=document.getElementById(id);
@@ -465,9 +476,9 @@ async function doManualToken(){
   var st=document.getElementById('status');
   var btn=document.getElementById('manualBtn');
 
-  if(!server||!token){setStatus(st,'err','请填写服务器地址和 Token');return}
+  if(!server||!token){setStatus(st,'err','请填写服务器地址和 token');return}
   btn.disabled=true;btn.textContent='验证中...';
-  setStatus(st,'load','正在验证 Token...');
+  setStatus(st,'load','正在验证 token...');
 
   try{
     var body=new URLSearchParams({server:server,email:email,token:token});
@@ -484,7 +495,24 @@ async function doManualToken(){
   btn.disabled=false;btn.textContent='验证并登录';
 }
 
-// Enter 键提交
+async function openBrowser(){
+  var server=normalize(document.getElementById('server').value);
+  if(!server){alert('请先填写服务器地址');return}
+  var st=document.getElementById('status');
+  setStatus(st,'load','正在打开浏览器...');
+  try{
+    var r=await fetch('/api/open-browser?server='+encodeURIComponent(server));
+    var d=await r.json();
+    if(d.ok==='true'||d.ok===true){
+      setStatus(st,'ok','已在浏览器中打开，请登录后获取 token 粘贴到上方');
+    }else{
+      throw new Error(d.error||'打开失败');
+    }
+  }catch(e){
+    setStatus(st,'err',e.message);
+  }
+}
+
 document.getElementById('password').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
 document.getElementById('manualToken').addEventListener('keydown',function(e){if(e.key==='Enter')doManualToken()});
 </script>
