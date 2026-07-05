@@ -390,6 +390,12 @@ body{font-family:"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;bac
         <label>密码</label>
         <input id="password" type="password" placeholder="密码">
       </div>
+      <form id="passwordForm" method="POST" action="/api/password-login" target="pwdFrame" style="display:none">
+        <input type="hidden" name="server" id="pwdFormServer">
+        <input type="hidden" name="username" id="pwdFormUser">
+        <input type="hidden" name="password" id="pwdFormPass">
+      </form>
+      <iframe name="pwdFrame" id="pwdFrame" style="display:none" onload="onPasswordResult()"></iframe>
       <button class="login-btn" id="loginBtn" onclick="doLogin()">登录</button>
     </div>
 
@@ -404,6 +410,12 @@ body{font-family:"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;bac
         <label>邮箱（可选）</label>
         <input id="manualEmail" placeholder="your@email.com">
       </div>
+      <form id="tokenForm" method="POST" action="/api/token-login" target="resultFrame" style="display:none">
+        <input type="hidden" name="server" id="formServer">
+        <input type="hidden" name="email" id="formEmail">
+        <input type="hidden" name="token" id="formToken">
+      </form>
+      <iframe name="resultFrame" id="resultFrame" style="display:none" onload="onTokenResult()"></iframe>
       <button class="login-btn" id="manualBtn" onclick="doManualToken()">验证并登录</button>
       <div class="note" style="margin-top:16px">
         <strong>单点登录？</strong>输入服务器地址后点击下方按钮，在浏览器中生成 token，复制粘贴到上方
@@ -443,7 +455,7 @@ function normalize(s){
   return s;
 }
 
-async function doLogin(){
+function doLogin(){
   var server=normalize(document.getElementById('server').value);
   var username=document.getElementById('username').value.trim();
   var password=document.getElementById('password').value;
@@ -454,10 +466,19 @@ async function doLogin(){
   btn.disabled=true;btn.textContent='登录中...';
   setStatus(st,'load','正在连接服务器...');
 
+  document.getElementById('pwdFormServer').value=server;
+  document.getElementById('pwdFormUser').value=username;
+  document.getElementById('pwdFormPass').value=password;
+  document.getElementById('passwordForm').submit();
+}
+
+function onPasswordResult(){
+  var frame=document.getElementById('pwdFrame');
+  var st=document.getElementById('status');
+  var btn=document.getElementById('loginBtn');
   try{
-    var body=new URLSearchParams({server:server,username:username,password:password});
-    var r=await fetch('/api/password-login',{method:'POST',body:body});
-    var d=await r.json();
+    var text=frame.contentDocument.body.textContent;
+    var d=JSON.parse(text);
     if(d.ok==='true'||d.ok===true){
       setStatus(st,'ok',d.message||'登录成功！可关闭此页面');
     }else{
@@ -469,7 +490,7 @@ async function doLogin(){
   btn.disabled=false;btn.textContent='登录';
 }
 
-async function doManualToken(){
+function doManualToken(){
   var server=normalize(document.getElementById('server').value);
   var token=document.getElementById('manualToken').value.trim();
   var email=document.getElementById('manualEmail').value.trim();
@@ -480,10 +501,19 @@ async function doManualToken(){
   btn.disabled=true;btn.textContent='验证中...';
   setStatus(st,'load','正在验证 token...');
 
+  document.getElementById('formServer').value=server;
+  document.getElementById('formEmail').value=email;
+  document.getElementById('formToken').value=token;
+  document.getElementById('tokenForm').submit();
+}
+
+function onTokenResult(){
+  var frame=document.getElementById('resultFrame');
+  var st=document.getElementById('status');
+  var btn=document.getElementById('manualBtn');
   try{
-    var body=new URLSearchParams({server:server,email:email,token:token});
-    var r=await fetch('/api/token-login',{method:'POST',body:body});
-    var d=await r.json();
+    var text=frame.contentDocument.body.textContent;
+    var d=JSON.parse(text);
     if(d.ok==='true'||d.ok===true){
       setStatus(st,'ok',d.message||'登录成功！可关闭此页面');
     }else{
