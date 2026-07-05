@@ -89,19 +89,6 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 获取已有文件列表（skip 模式用）
-	var existingFiles map[string]bool
-	if uploadMode == "skip" {
-		existingFiles, _ = listRemoteFiles(cfg, repoID, remoteDir)
-		fmt.Printf("服务器已有 %d 个文件\n", len(existingFiles))
-	}
-
-	// 获取 upload link
-	uploadLink, err := getUploadLink(cfg, repoID, remoteDir)
-	if err != nil {
-		return fmt.Errorf("获取上传链接失败: %w", err)
-	}
-
 	// 收集所有文件
 	var files []string
 	filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
@@ -119,42 +106,62 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	fmt.Printf("本地目录: %s\n", localDir)
 	fmt.Printf("共 %d 个文件\n\n", len(files))
 
-	// 收集需要创建的目录（按层级排序）
-	var dirs []string
+	// 收集并创建缺失的目录
 	dirSet := make(map[string]bool)
 	for _, filePath := range files {
 		relPath, _ := filepath.Rel(localDir, filePath)
 		relDir := filepath.Dir(relPath)
 		if relDir != "." {
-			dir := remoteDir + "/" + filepath.ToSlash(relDir)
-			dirSet[dir] = true
+			dirSet[remoteDir+"/"+filepath.ToSlash(relDir)] = true
 		}
 	}
+	var dirs []string
 	for dir := range dirSet {
 		dirs = append(dirs, dir)
 	}
+	// 按深度排序，确保父目录先创建
 	sort.Slice(dirs, func(i, j int) bool {
 		return strings.Count(dirs[i], "/") < strings.Count(dirs[j], "/")
 	})
 
-	// 创建目录
-	createdSet := make(map[string]bool)
-	createdSet[remoteDir] = true
 	if len(dirs) > 0 {
 		fmt.Printf("创建 %d 个目录...\n", len(dirs))
+		created, skipped, failed := 0, 0, 0
 		for _, dir := range dirs {
+			// 先查询父目录，看子目录是否已存在
 			parent := filepath.Dir(dir)
-			if !createdSet[parent] && parent != remoteDir {
-				createDir(cfg, repoID, parent)
-				createdSet[parent] = true
+			child := filepath.Base(dir)
+			existingChildren, err := listRemoteDirs(cfg, repoID, parent)
+			if err == nil {
+				exists := false
+				for _, c := range existingChildren {
+					if c == child {
+						exists = true
+						break
+					}
+				}
+				if exists {
+					skipped++
+					continue
+				}
 			}
-			createDir(cfg, repoID, dir)
-			createdSet[dir] = true
+			if err := createDir(cfg, repoID, dir); err != nil {
+				failed++
+			} else {
+				created++
+			}
 		}
-		fmt.Println()
+		fmt.Printf("  %d 新建, %d 已存在, %d 失败\n\n", created, skipped, failed)
 	}
 
-	// 逐个上传
+	// 获取已有文件列表（skip 模式用）
+	var existingFiles map[string]bool
+	if uploadMode == "skip" {
+		existingFiles, _ = listRemoteFiles(cfg, repoID, remoteDir)
+		fmt.Printf("服务器已有 %d 个文件\n", len(existingFiles))
+	}
+
+	// 逐个上传（每个文件获取对应的 upload link）
 	success, skip, fail := 0, 0, 0
 	for i, filePath := range files {
 		relPath, _ := filepath.Rel(localDir, filePath)
@@ -166,8 +173,23 @@ func runUpload(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// 计算该文件所在的远程目录
+		relDir := filepath.Dir(relPath)
+		fileRemoteDir := remoteDir
+		if relDir != "." {
+			fileRemoteDir = remoteDir + "/" + filepath.ToSlash(relDir)
+		}
+
+		// 获取该目录的 upload link
+		fileUploadLink, err := getUploadLink(cfg, repoID, fileRemoteDir)
+		if err != nil {
+			fmt.Printf("[%d/%d %.0f%%] %s\n  ✗ 获取上传链接失败: %v\n", i+1, len(files), percent, relPath, err)
+			fail++
+			continue
+		}
+
 		fmt.Printf("[%d/%d %.0f%%] %s\n", i+1, len(files), percent, relPath)
-		if err := uploadFile(cfg, uploadLink, remoteDir, localDir, filePath); err != nil {
+		if err := uploadFile(cfg, fileUploadLink, fileRemoteDir, localDir, filePath); err != nil {
 			fmt.Printf("  ✗ 失败: %v\n", err)
 			fail++
 		} else {
@@ -267,7 +289,6 @@ func listRemoteFiles(cfg *config.Config, repoID, dir string) (map[string]bool, e
 	var entries []struct {
 		Type string `json:"type"`
 		Name string `json:"name"`
-		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
 		return nil, err
@@ -282,6 +303,38 @@ func listRemoteFiles(cfg *config.Config, repoID, dir string) (map[string]bool, e
 	return files, nil
 }
 
+func listRemoteDirs(cfg *config.Config, repoID, dir string) ([]string, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	url := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, dir)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Token "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var entries []struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, err
+	}
+
+	var dirs []string
+	for _, e := range entries {
+		if e.Type == "dir" {
+			dirs = append(dirs, e.Name)
+		}
+	}
+	return dirs, nil
+}
+
 func getUploadLink(cfg *config.Config, repoID, dir string) (string, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	url := fmt.Sprintf("%s/api2/repos/%s/upload-link/?p=%s", cfg.Server, repoID, dir)
@@ -293,11 +346,13 @@ func getUploadLink(cfg *config.Config, repoID, dir string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	var link string
-	if err := json.NewDecoder(resp.Body).Decode(&link); err != nil {
-		return "", err
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
-	link = strings.Trim(link, `"`)
+
+	// 响应可能是带引号的字符串 "https://..."
+	link := strings.Trim(string(body), `"`)
 	return link, nil
 }
 
