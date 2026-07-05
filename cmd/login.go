@@ -1,10 +1,10 @@
 package cmd
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,7 +20,7 @@ var loginCmd = &cobra.Command{
 	Use:   "login",
 	Short: "登录 Seafile 服务器",
 	Long: `登录方式：
-  --web                弹出网页登录（支持密码登录 / SSO 扫码）
+  --web                打开浏览器获取 token，终端输入验证
   --config <file.json> 直接导入 JSON 配置`,
 	RunE: runLogin,
 }
@@ -32,7 +32,7 @@ var (
 )
 
 func init() {
-	loginCmd.Flags().BoolVar(&webMode, "web", false, "弹出网页登录界面")
+	loginCmd.Flags().BoolVar(&webMode, "web", false, "弹出浏览器获取 token")
 	loginCmd.Flags().StringVar(&configFile, "config", "", "JSON 配置文件路径（含 server/email/token 字段）")
 	rootCmd.AddCommand(loginCmd)
 }
@@ -49,7 +49,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	case webMode:
 		return loginWithWeb(rootDir)
 	default:
-		return cmd.Help()
+		return loginWithTerminal(rootDir)
 	}
 }
 
@@ -91,156 +91,107 @@ func loginWithConfig(rootDir string) error {
 	return nil
 }
 
-// --web 模式：本地 HTTP 页面 + 后端接口
+// --web 模式：打开浏览器获取 token，终端输入验证
 func loginWithWeb(rootDir string) error {
-	type loginResult struct{ server, email, token string }
-	resultCh := make(chan loginResult, 1)
+	reader := bufio.NewReader(os.Stdin)
 
-	mux := http.NewServeMux()
+	fmt.Println("请输入服务器地址（例如 https://pan.hep.com.cn）：")
+	fmt.Print("> ")
+	server, _ := reader.ReadString('\n')
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return fmt.Errorf("服务器地址不能为空")
+	}
+	server = normalizeServerURL(server)
 
-	// 首页：登录表单
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, loginHTML)
-	})
+	// 打开浏览器到 token 设置页
+	tokenURL := server + "/profile"
+	fmt.Printf("\n正在打开浏览器: %s\n", tokenURL)
+	fmt.Println("请在浏览器中：")
+	fmt.Println("  1. 登录（如未登录）")
+	fmt.Println("  2. 找到 API Token / 个人令牌")
+	fmt.Println("  3. 生成新令牌并复制\n")
+	exec.Command("open", tokenURL).Start()
 
-	// API：密码登录 → Seafile api2/auth-token
-	mux.HandleFunc("/api/password-login", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		server := r.FormValue("server")
-		username := r.FormValue("username")
-		password := r.FormValue("password")
-		if server == "" || username == "" || password == "" {
-			jsonError(w, "服务器地址、用户名和密码不能为空")
-			return
-		}
-		server = normalizeServerURL(server)
+	fmt.Print("请粘贴 API Token:\n> ")
+	token, _ := reader.ReadString('\n')
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("token 不能为空")
+	}
 
-		// 调用 Seafile API 获取 token
-		token, err := fetchAuthToken(server, username, password)
-		if err != nil {
-			jsonError(w, err.Error())
-			return
-		}
+	fmt.Println("\n正在验证...")
+	if err := validateToken(server, token); err != nil {
+		return fmt.Errorf("验证失败: %w", err)
+	}
 
-		// 保存配置
-		cfg := config.NewConfig(rootDir)
-		if err := cfg.Load(); err != nil {
-			jsonError(w, err.Error())
-			return
-		}
-		cfg.Server = server
-		cfg.Username = username
-		cfg.Token = token
-		if err := cfg.Save(); err != nil {
-			jsonError(w, err.Error())
-			return
-		}
+	fmt.Print("请输入邮箱（可选，回车跳过）:\n> ")
+	email, _ := reader.ReadString('\n')
+	email = strings.TrimSpace(email)
 
-		select {
-		case resultCh <- loginResult{server: server, email: username, token: token}:
-		default:
-		}
-		jsonOK(w, fmt.Sprintf("登录成功: %s", server))
-	})
-
-	// API：Token 登录
-	mux.HandleFunc("/api/token-login", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		server := r.FormValue("server")
-		email := r.FormValue("email")
-		token := r.FormValue("token")
-		if server == "" || token == "" {
-			jsonError(w, "服务器地址和 token 不能为空")
-			return
-		}
-		server = normalizeServerURL(server)
-		if err := validateToken(server, token); err != nil {
-			jsonError(w, err.Error())
-			return
-		}
-		cfg := config.NewConfig(rootDir)
-		if err := cfg.Load(); err != nil {
-			jsonError(w, err.Error())
-			return
-		}
-		cfg.Server = server
-		cfg.Username = email
-		cfg.Token = token
-		if err := cfg.Save(); err != nil {
-			jsonError(w, err.Error())
-			return
-		}
-		select {
-		case resultCh <- loginResult{server: server, email: email, token: token}:
-		default:
-		}
-		jsonOK(w, fmt.Sprintf("登录成功: %s", server))
-	})
-
-	// API：检测服务器可达性
-	mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) {
-		server := normalizeServerURL(r.URL.Query().Get("server"))
-		if server == "" {
-			jsonError(w, "参数缺失")
-			return
-		}
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Get(server + "/api2/auth/ping/")
-		if err != nil {
-			jsonError(w, fmt.Sprintf("服务器不可达: %s", err))
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			jsonOK(w, "服务器连接正常")
-		} else {
-			jsonError(w, fmt.Sprintf("服务器响应: HTTP %d", resp.StatusCode))
-		}
-	})
-
-	mux.HandleFunc("/api/open-browser", func(w http.ResponseWriter, r *http.Request) {
-		server := normalizeServerURL(r.URL.Query().Get("server"))
-		if server == "" {
-			jsonError(w, "请先填写服务器地址")
-			return
-		}
-		if err := exec.Command("open", server).Start(); err != nil {
-			jsonError(w, fmt.Sprintf("打开浏览器失败: %s", err))
-			return
-		}
-		jsonOK(w, "已在浏览器中打开")
-	})
-
-	ln, err := openPort()
-	if err != nil {
+	cfg := config.NewConfig(rootDir)
+	if err := cfg.Load(); err != nil {
 		return err
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	srv := &http.Server{Handler: mux, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
-	go srv.Serve(ln)
-	defer srv.Shutdown(nil)
-
-	addr := fmt.Sprintf("http://127.0.0.1:%d", port)
-	fmt.Printf("正在打开登录页面...\n")
-	exec.Command("open", addr).Start()
-
-	select {
-	case r := <-resultCh:
-		fmt.Printf("\n✓ 登录成功\n  服务器: %s\n", r.server)
-		if r.email != "" {
-			fmt.Printf("  用户: %s\n", r.email)
-		}
-		return nil
-	case <-time.After(15 * time.Minute):
-		return fmt.Errorf("登录超时")
+	cfg.Server = server
+	cfg.Username = email
+	cfg.Token = token
+	if err := cfg.Save(); err != nil {
+		return err
 	}
+
+	fmt.Printf("\n✓ 登录成功\n  服务器: %s\n", server)
+	if email != "" {
+		fmt.Printf("  用户: %s\n", email)
+	}
+	return nil
+}
+
+// 无参数模式：终端交互式登录
+func loginWithTerminal(rootDir string) error {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Println("=== Seafile 登录 ===\n")
+
+	fmt.Print("服务器地址（例如 https://pan.hep.com.cn）:\n> ")
+	server, _ := reader.ReadString('\n')
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return fmt.Errorf("服务器地址不能为空")
+	}
+	server = normalizeServerURL(server)
+
+	fmt.Print("邮箱/用户名:\n> ")
+	username, _ := reader.ReadString('\n')
+	username = strings.TrimSpace(username)
+
+	fmt.Print("密码:\n> ")
+	password, _ := reader.ReadString('\n')
+	password = strings.TrimSpace(password)
+
+	if username == "" || password == "" {
+		return fmt.Errorf("用户名和密码不能为空")
+	}
+
+	fmt.Println("\n正在登录...")
+	token, err := fetchAuthToken(server, username, password)
+	if err != nil {
+		return fmt.Errorf("登录失败: %w", err)
+	}
+
+	cfg := config.NewConfig(rootDir)
+	if err := cfg.Load(); err != nil {
+		return err
+	}
+	cfg.Server = server
+	cfg.Username = username
+	cfg.Token = token
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+
+	fmt.Printf("\n✓ 登录成功\n  服务器: %s\n  用户: %s\n", server, username)
+	return nil
 }
 
 func fetchAuthToken(server, username, password string) (string, error) {
@@ -253,7 +204,6 @@ func fetchAuthToken(server, username, password string) (string, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		// 尝试解析 Seafile 错误信息
 		var seaErr struct {
 			ErrorMsg string `json:"error_msg"`
 			Detail   string `json:"detail"`
@@ -278,13 +228,9 @@ func fetchAuthToken(server, username, password string) (string, error) {
 		token = result.Key
 	}
 	if token == "" {
-		return "", fmt.Errorf("服务器未返回 Token")
+		return "", fmt.Errorf("服务器未返回 token")
 	}
 	return token, nil
-}
-
-func openPort() (net.Listener, error) {
-	return net.Listen("tcp", "127.0.0.1:8765")
 }
 
 func validateToken(server, token string) error {
@@ -312,227 +258,3 @@ func normalizeServerURL(s string) string {
 	}
 	return s
 }
-
-func jsonOK(w http.ResponseWriter, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"ok":true,"message":"%s"}`, msg)
-}
-
-func jsonError(w http.ResponseWriter, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	b, _ := json.Marshal(map[string]string{"ok": "false", "error": msg})
-	w.Write(b)
-}
-
-// --- HTML ---
-
-const loginHTML = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Seafile 客户端登录</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;background:#f0f2f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-.box{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.1);width:100%;max-width:460px;overflow:hidden}
-.header{padding:28px 32px 12px}
-.header h1{font-size:20px;color:#ff8800;font-weight:700}
-.header .sub{font-size:13px;color:#999;margin-top:4px}
-.form{padding:0 32px 28px}
-.field{margin-bottom:16px}
-.field label{display:block;font-size:13px;color:#666;margin-bottom:6px}
-.field input{width:100%;padding:10px 12px;border:1px solid #d9d9d9;border-radius:6px;font-size:14px;outline:none;transition:border-color .2s}
-.field input:focus{border-color:#ff8800}
-.field .hint{font-size:11px;color:#bbb;margin-top:4px}
-.tabs{display:flex;border-bottom:1px solid #f0f0f0;margin-bottom:16px}
-.tab{flex:1;text-align:center;padding:10px 0;font-size:14px;color:#999;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
-.tab.active{color:#ff8800;border-bottom-color:#ff8800;font-weight:600}
-.tab:hover{color:#666}
-.login-btn{width:100%;padding:12px;background:#ff8800;color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .2s}
-.login-btn:hover{opacity:.9}
-.login-btn:disabled{background:#ccc;cursor:not-allowed}
-.note{margin-top:12px;font-size:12px;color:#999;line-height:1.6}
-.note code{background:#f5f5f5;padding:2px 6px;border-radius:3px;font-size:11px}
-#status{margin-top:12px;padding:10px;border-radius:6px;font-size:13px;line-height:1.5;display:none}
-.s-ok{background:#f6ffed;color:#52c41a;border:1px solid #b7eb8f;display:block}
-.s-err{background:#fff2f0;color:#ff4d4f;border:1px solid #ffccc7;display:block}
-.s-load{background:#e6f7ff;color:#1677ff;border:1px solid #91d5ff;display:block}
-.panel{display:none}
-.panel.active{display:block}
-</style>
-</head>
-<body>
-<div class="box">
-  <div class="header">
-    <h1>添加帐号</h1>
-    <div class="sub">连接到 Seafile 服务器</div>
-  </div>
-  <div class="form">
-    <div class="field">
-      <label>服务器地址</label>
-      <input id="server" autocapitalize="none" placeholder="例如：https://seacloud.cc 或 http://192.168.1.24:8000" value="https://">
-      <div class="hint">输入 Seafile 服务器 URL</div>
-    </div>
-
-    <div class="tabs">
-      <div class="tab active" onclick="switchTab('password')">密码登录</div>
-      <div class="tab" onclick="switchTab('sso')">单点登录 / token</div>
-    </div>
-
-    <!-- 密码登录 -->
-    <div class="panel active" id="panel-password">
-      <div class="field">
-        <label>邮箱 / 用户名</label>
-        <input id="username" placeholder="your@email.com">
-      </div>
-      <div class="field">
-        <label>密码</label>
-        <input id="password" type="password" placeholder="密码">
-      </div>
-      <form id="passwordForm" method="POST" action="/api/password-login" target="pwdFrame" style="display:none">
-        <input type="hidden" name="server" id="pwdFormServer">
-        <input type="hidden" name="username" id="pwdFormUser">
-        <input type="hidden" name="password" id="pwdFormPass">
-      </form>
-      <iframe name="pwdFrame" id="pwdFrame" style="display:none" onload="onPasswordResult()"></iframe>
-      <button class="login-btn" id="loginBtn" onclick="doLogin()">登录</button>
-    </div>
-
-    <!-- SSO / Token 登录 -->
-    <div class="panel" id="panel-sso">
-      <div class="field">
-        <label>api token</label>
-        <input id="manualToken" placeholder="粘贴从网页设置中获取的 api token">
-        <div class="hint">登录服务器网页 → 个人设置 → api 令牌 → 生成新令牌</div>
-      </div>
-      <div class="field">
-        <label>邮箱（可选）</label>
-        <input id="manualEmail" placeholder="your@email.com">
-      </div>
-      <form id="tokenForm" method="POST" action="/api/token-login" target="resultFrame" style="display:none">
-        <input type="hidden" name="server" id="formServer">
-        <input type="hidden" name="email" id="formEmail">
-        <input type="hidden" name="token" id="formToken">
-      </form>
-      <iframe name="resultFrame" id="resultFrame" style="display:none" onload="onTokenResult()"></iframe>
-      <button class="login-btn" id="manualBtn" onclick="doManualToken()">验证并登录</button>
-      <div class="note" style="margin-top:16px">
-        <strong>单点登录？</strong>输入服务器地址后点击下方按钮，在浏览器中生成 token，复制粘贴到上方
-      </div>
-      <button class="login-btn" style="background:#1677ff;margin-top:12px" onclick="openBrowser()">打开 API Token 设置页</button>
-    </div>
-
-    <div id="status"></div>
-
-    <div class="note" style="margin-top:16px">
-      也可通过命令行直接导入：<br>
-      <code>seaf-cli login --config config.json</code><br>
-      配置文件格式：{"server":"...","email":"...","token":"..."}
-    </div>
-  </div>
-</div>
-
-<script>
-function switchTab(tab){
-  document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});
-  document.querySelectorAll('.panel').forEach(function(p){p.classList.remove('active')});
-  if(tab==='password'){
-    document.querySelectorAll('.tab')[0].classList.add('active');
-    document.getElementById('panel-password').classList.add('active');
-  }else{
-    document.querySelectorAll('.tab')[1].classList.add('active');
-    document.getElementById('panel-sso').classList.add('active');
-  }
-}
-function setStatus(id,cls,txt){
-  var el=document.getElementById(id);
-  el.className='s-'+cls;el.textContent=txt;el.style.display='block';
-}
-function normalize(s){
-  s=s.trim().replace(/\/+$/,'');
-  if(!/^https?:\/\//.test(s)) s='https://'+s;
-  return s;
-}
-
-function doLogin(){
-  var server=normalize(document.getElementById('server').value);
-  var username=document.getElementById('username').value.trim();
-  var password=document.getElementById('password').value;
-  var st=document.getElementById('status');
-  var btn=document.getElementById('loginBtn');
-
-  if(!server||!username||!password){setStatus(st,'err','请填写完整信息');return}
-  btn.disabled=true;btn.textContent='登录中...';
-  setStatus(st,'load','正在连接服务器...');
-
-  document.getElementById('pwdFormServer').value=server;
-  document.getElementById('pwdFormUser').value=username;
-  document.getElementById('pwdFormPass').value=password;
-  document.getElementById('passwordForm').submit();
-}
-
-function onPasswordResult(){
-  var frame=document.getElementById('pwdFrame');
-  var st=document.getElementById('status');
-  var btn=document.getElementById('loginBtn');
-  try{
-    var text=frame.contentDocument.body.textContent;
-    var d=JSON.parse(text);
-    if(d.ok==='true'||d.ok===true){
-      setStatus(st,'ok',d.message||'登录成功！可关闭此页面');
-    }else{
-      throw new Error(d.error||'登录失败');
-    }
-  }catch(e){
-    setStatus(st,'err',e.message);
-  }
-  btn.disabled=false;btn.textContent='登录';
-}
-
-function doManualToken(){
-  var server=normalize(document.getElementById('server').value);
-  var token=document.getElementById('manualToken').value.trim();
-  var email=document.getElementById('manualEmail').value.trim();
-  var st=document.getElementById('status');
-  var btn=document.getElementById('manualBtn');
-
-  if(!server||!token){setStatus(st,'err','请填写服务器地址和 token');return}
-  btn.disabled=true;btn.textContent='验证中...';
-  setStatus(st,'load','正在验证 token...');
-
-  document.getElementById('formServer').value=server;
-  document.getElementById('formEmail').value=email;
-  document.getElementById('formToken').value=token;
-  document.getElementById('tokenForm').submit();
-}
-
-function onTokenResult(){
-  var frame=document.getElementById('resultFrame');
-  var st=document.getElementById('status');
-  var btn=document.getElementById('manualBtn');
-  try{
-    var text=frame.contentDocument.body.textContent;
-    var d=JSON.parse(text);
-    if(d.ok==='true'||d.ok===true){
-      setStatus(st,'ok',d.message||'登录成功！可关闭此页面');
-    }else{
-      throw new Error(d.error||'验证失败');
-    }
-  }catch(e){
-    setStatus(st,'err',e.message);
-  }
-  btn.disabled=false;btn.textContent='验证并登录';
-}
-
-async function openBrowser(){
-  var server=normalize(document.getElementById('server').value);
-  if(!server){alert('请先填写服务器地址');return}
-  window.open(server+'/profile', '_blank');
-}
-
-document.getElementById('password').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
-document.getElementById('manualToken').addEventListener('keydown',function(e){if(e.key==='Enter')doManualToken()});
-</script>
-</body>
-</html>`
