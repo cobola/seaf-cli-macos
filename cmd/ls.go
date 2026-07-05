@@ -10,14 +10,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type dirEntry struct {
-	Type  string `json:"type"`
-	Name  string `json:"name"`
-	Size  int64  `json:"size"`
-	MTime int64  `json:"mtime"`
-	Id    string `json:"id"`
-}
-
 var lsCmd = &cobra.Command{
 	Use:   "ls <资料库名或ID> [路径]",
 	Short: "列出资料库中的文件和目录",

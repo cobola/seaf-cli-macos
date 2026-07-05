@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/cobola/seaf-cli-macos/internal/config"
 )
 
 var listCmd = &cobra.Command{
@@ -91,23 +90,4 @@ func formatSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
-}
-
-func loadConfig() (*config.Config, error) {
-	rootDir := initRootDir
-	if rootDir == "" {
-		rootDir = config.GetDefaultRootDir()
-	}
-	cfg := config.NewConfig(rootDir)
-	if err := cfg.Load(); err != nil {
-		return nil, fmt.Errorf("未登录，请先执行 seaf-cli login")
-	}
-	if cfg.Server == "" || cfg.Token == "" {
-		return nil, fmt.Errorf("未登录，请先执行 seaf-cli login")
-	}
-	// 尝试从钥匙串读取 token（优先使用钥匙串）
-	if keychainToken, err := keychainGet(cfg.Server); err == nil && keychainToken != "" {
-		cfg.Token = keychainToken
-	}
-	return cfg, nil
 }

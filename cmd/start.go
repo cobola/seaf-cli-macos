@@ -43,8 +43,10 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	
 	// 设置环境变量
+	distDir := filepath.Dir(filepath.Dir(getDaemonPath()))
 	env := os.Environ()
-	env = append(env, fmt.Sprintf("DYLD_LIBRARY_PATH=%s/lib", getRootDir()))
+	env = append(env, fmt.Sprintf("DYLD_LIBRARY_PATH=%s/dist/lib", distDir))
+	env = append(env, fmt.Sprintf("PYTHONPATH=%s/dist/lib/python3.9/site-packages", distDir))
 	
 	// 启动守护进程
 	fmt.Println("启动 seaf-daemon...")
@@ -100,13 +102,26 @@ func isDaemonRunning() bool {
 }
 
 func getDaemonPath() string {
-	// 优先使用本地路径
-	localPath := filepath.Join(getRootDir(), "bin", "seaf-daemon")
-	if _, err := os.Stat(localPath); err == nil {
-		return localPath
+	exe, _ := os.Executable()
+	exeDir := filepath.Dir(exe)
+	// 先看同目录
+	p := filepath.Join(exeDir, "seaf-daemon")
+	if _, err := os.Stat(p); err == nil {
+		return p
 	}
-	
-	// 回退到系统路径
+	// 向上查找 dist/bin/seaf-daemon
+	dir := exeDir
+	for i := 0; i < 5; i++ {
+		p := filepath.Join(dir, "dist", "bin", "seaf-daemon")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
 	return "seaf-daemon"
 }
 
