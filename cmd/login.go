@@ -498,19 +498,7 @@ async function doManualToken(){
 async function openBrowser(){
   var server=normalize(document.getElementById('server').value);
   if(!server){alert('请先填写服务器地址');return}
-  var st=document.getElementById('status');
-  setStatus(st,'load','正在打开浏览器...');
-  try{
-    var r=await fetch('/api/open-browser?server='+encodeURIComponent(server));
-    var d=await r.json();
-    if(d.ok==='true'||d.ok===true){
-      setStatus(st,'ok','已在浏览器中打开，请登录后获取 token 粘贴到上方');
-    }else{
-      throw new Error(d.error||'打开失败');
-    }
-  }catch(e){
-    setStatus(st,'err',e.message);
-  }
+  window.open(server, '_blank');
 }
 
 document.getElementById('password').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
