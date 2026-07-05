@@ -84,18 +84,26 @@ func runSync(cmd *cobra.Command, args []string) error {
 	if encVersion == 0 {
 		encVersion = 1
 	}
+
+	// 注意: passwd 必须传 nil（JSON null），不能传空字符串 ""
+	// 空字符串在 C 里不是 NULL，会触发 "Incorrect password" 错误
+	var passwd interface{} = nil
+	if downloadInfo.Encrypted {
+		passwd = "" // 加密库需要密码，这里暂不支持
+	}
+
 	_, err = client.call("seafile_download",
-		libraryID,              // repo_id
+		libraryID,                // repo_id
 		downloadInfo.RepoVersion, // repo_version
-		downloadInfo.RepoName,   // name
-		localDir,               // wt_parent
-		downloadInfo.Token,     // token
-		"",                     // password
-		downloadInfo.Magic,     // magic
-		downloadInfo.Email,     // email
-		downloadInfo.RandomKey, // random_key
-		encVersion,             // enc_version
-		string(moreInfoJSON),   // more_info
+		downloadInfo.RepoName,    // name
+		localDir,                 // wt_parent
+		downloadInfo.Token,       // token
+		passwd,                   // password (空=非加密)
+		downloadInfo.Magic,       // magic
+		downloadInfo.Email,       // email
+		downloadInfo.RandomKey,   // random_key
+		encVersion,               // enc_version
+		string(moreInfoJSON),     // more_info
 	)
 	if err != nil {
 		return fmt.Errorf("同步失败: %w", err)

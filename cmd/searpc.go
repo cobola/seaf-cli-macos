@@ -36,7 +36,12 @@ func (c *searpcClient) call(method string, args ...interface{}) (interface{}, er
 	// searpc 请求是 JSON 数组: [method, arg1, arg2, ...]
 	innerReq := []interface{}{method}
 	innerReq = append(innerReq, args...)
-	innerJSON, _ := json.Marshal(innerReq)
+
+	// 使用 json.Marshal 会自动把 nil 转为 JSON null
+	innerJSON, err := json.Marshal(innerReq)
+	if err != nil {
+		return nil, fmt.Errorf("序列化请求失败: %w", err)
+	}
 
 	// named pipe 传输层包装: {"service": "...", "request": "[...]"}
 	wrapReq := map[string]string{
