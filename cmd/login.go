@@ -371,7 +371,7 @@ body{font-family:"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;bac
   <div class="form">
     <div class="field">
       <label>服务器地址</label>
-      <input id="server" placeholder="例如：https://seacloud.cc 或 http://192.168.1.24:8000">
+      <input id="server" placeholder="例如：https://seacloud.cc 或 http://192.168.1.24:8000" value="https://">
       <div class="hint">输入 Seafile 服务器 URL</div>
     </div>
 
@@ -439,7 +439,8 @@ function setStatus(id,cls,txt){
 }
 function normalize(s){
   s=s.trim().replace(/\/+$/,'');
-  if(!/^https?:\/\//.test(s)) s='https://'+s;
+  if(!/^https?:\/\//i.test(s)) s='https://'+s;
+  s=s.replace(/^https?:\/\//i, function(m){return m.toLowerCase()});
   return s;
 }
 
