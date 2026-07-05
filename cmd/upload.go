@@ -150,7 +150,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 			} else {
 				created++
 			}
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 		}
 		fmt.Printf("  %d 新建, %d 已存在, %d 失败\n\n", created, skipped, failed)
 	}
@@ -203,7 +203,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		} else {
 			success++
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	fmt.Printf("\n完成: %d 成功", success)
