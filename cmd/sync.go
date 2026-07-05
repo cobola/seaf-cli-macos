@@ -17,7 +17,6 @@ import (
 func getDistDir() string {
 	exe, _ := os.Executable()
 	exeDir := filepath.Dir(exe)
-	// 向上查找 dist/bin/seaf-cli
 	dir := exeDir
 	for i := 0; i < 5; i++ {
 		if _, err := os.Stat(filepath.Join(dir, "dist", "bin", "seaf-cli")); err == nil {
@@ -37,7 +36,6 @@ func runSeafCli(args ...string) (string, error) {
 	binDir := filepath.Join(distDir, "dist", "bin")
 	seafCli := filepath.Join(binDir, "seaf-cli")
 
-	// 找 python3
 	python := "python3"
 	if _, err := exec.LookPath(python); err != nil {
 		python = "/usr/bin/python3"
@@ -52,12 +50,21 @@ func runSeafCli(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// --- list (local) ---
+// hasSeafCli 检查 seaf-cli Python 是否可用
+func hasSeafCli() bool {
+	distDir := getDistDir()
+	_, err := os.Stat(filepath.Join(distDir, "dist", "bin", "seaf-cli"))
+	return err == nil
+}
 
+// --- list (local) via seaf-cli Python ---
 var listLocalCmd = &cobra.Command{
 	Use:   "list-local",
 	Short: "列出已同步到本地的资料库",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !hasSeafCli() {
+			return fmt.Errorf("seaf-cli Python 不可用，请从项目目录运行或重新安装")
+		}
 		out, err := runSeafCli("list")
 		if err != nil {
 			return fmt.Errorf("获取本地资料库失败: %w\n%s", err, out)
@@ -71,12 +78,14 @@ var listLocalCmd = &cobra.Command{
 	},
 }
 
-// --- status ---
-
+// --- status via seaf-cli Python ---
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "显示同步状态",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !hasSeafCli() {
+			return fmt.Errorf("seaf-cli Python 不可用，请从项目目录运行或重新安装")
+		}
 		out, err := runSeafCli("status")
 		if err != nil {
 			return fmt.Errorf("获取状态失败: %w\n%s", err, out)
@@ -90,17 +99,19 @@ var statusCmd = &cobra.Command{
 	},
 }
 
-// --- sync ---
-
+// --- sync via seaf-cli Python ---
 var syncCmd = &cobra.Command{
 	Use:   "sync <资料库名或ID> <本地目录>",
 	Short: "同步资料库到本地目录",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !hasSeafCli() {
+			return fmt.Errorf("seaf-cli Python 不可用，请从项目目录运行或重新安装")
+		}
+
 		libraryID := args[0]
 		localDir := args[1]
 
-		// 确保本地目录存在
 		if err := os.MkdirAll(localDir, 0755); err != nil {
 			return fmt.Errorf("创建本地目录失败: %w", err)
 		}
@@ -110,7 +121,6 @@ var syncCmd = &cobra.Command{
 			return err
 		}
 
-		// 如果传入的是名字而非 ID，先查找 ID
 		if !strings.Contains(libraryID, "-") {
 			id, err := findRepoIDByName(cfg, libraryID)
 			if err != nil {
@@ -119,18 +129,14 @@ var syncCmd = &cobra.Command{
 			libraryID = id
 		}
 
-		// 配置 seaf-cli
-		out, err := runSeafCli("config", "-k", "url", "-v", cfg.Server)
-		if err != nil {
-			return fmt.Errorf("配置服务器失败: %w\n%s", err, out)
+		if _, err := runSeafCli("config", "-k", "url", "-v", cfg.Server); err != nil {
+			return fmt.Errorf("配置服务器失败: %w", err)
 		}
-		out, err = runSeafCli("config", "-k", "token", "-v", cfg.Token)
-		if err != nil {
-			return fmt.Errorf("配置 token 失败: %w\n%s", err, out)
+		if _, err := runSeafCli("config", "-k", "token", "-v", cfg.Token); err != nil {
+			return fmt.Errorf("配置 token 失败: %w", err)
 		}
 
-		// 同步
-		out, err = runSeafCli("sync", libraryID, localDir)
+		out, err := runSeafCli("sync", libraryID, localDir)
 		if err != nil {
 			return fmt.Errorf("同步失败: %w\n%s", err, out)
 		}
@@ -142,12 +148,14 @@ var syncCmd = &cobra.Command{
 }
 
 // --- desync ---
-
 var desyncCmd = &cobra.Command{
 	Use:   "desync <资料库ID>",
 	Short: "取消同步资料库",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !hasSeafCli() {
+			return fmt.Errorf("seaf-cli Python 不可用，请从项目目录运行或重新安装")
+		}
 		out, err := runSeafCli("desync", args[0])
 		if err != nil {
 			return fmt.Errorf("取消同步失败: %w\n%s", err, out)
