@@ -53,6 +53,25 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	}
 }
 
+// saveToken 保存 token 到配置文件和钥匙串
+func saveToken(rootDir, server, email, token string) error {
+	cfg := config.NewConfig(rootDir)
+	if err := cfg.Load(); err != nil {
+		return err
+	}
+	cfg.Server = server
+	cfg.Username = email
+	cfg.Token = token
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	// 尝试保存到钥匙串
+	if err := keychainSet(server, token); err != nil {
+		fmt.Printf("  提示: 钥匙串保存失败 (%v)，token 已存入配置文件\n", err)
+	}
+	return nil
+}
+
 // --config 模式：直接读取 JSON 文件导入
 func loginWithConfig(rootDir string) error {
 	data, err := os.ReadFile(configFile)
@@ -74,14 +93,7 @@ func loginWithConfig(rootDir string) error {
 	if err := validateToken(server, cred.Token); err != nil {
 		return fmt.Errorf("token 验证失败: %w", err)
 	}
-	cfg := config.NewConfig(rootDir)
-	if err := cfg.Load(); err != nil {
-		return err
-	}
-	cfg.Server = server
-	cfg.Username = cred.Email
-	cfg.Token = cred.Token
-	if err := cfg.Save(); err != nil {
+	if err := saveToken(rootDir, server, cred.Email, cred.Token); err != nil {
 		return err
 	}
 	fmt.Printf("✓ 登录成功  服务器: %s\n", server)
@@ -129,14 +141,7 @@ func loginWithWeb(rootDir string) error {
 	email, _ := reader.ReadString('\n')
 	email = strings.TrimSpace(email)
 
-	cfg := config.NewConfig(rootDir)
-	if err := cfg.Load(); err != nil {
-		return err
-	}
-	cfg.Server = server
-	cfg.Username = email
-	cfg.Token = token
-	if err := cfg.Save(); err != nil {
+	if err := saveToken(rootDir, server, email, token); err != nil {
 		return err
 	}
 
@@ -179,14 +184,7 @@ func loginWithTerminal(rootDir string) error {
 		return fmt.Errorf("登录失败: %w", err)
 	}
 
-	cfg := config.NewConfig(rootDir)
-	if err := cfg.Load(); err != nil {
-		return err
-	}
-	cfg.Server = server
-	cfg.Username = username
-	cfg.Token = token
-	if err := cfg.Save(); err != nil {
+	if err := saveToken(rootDir, server, username, token); err != nil {
 		return err
 	}
 
