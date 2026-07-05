@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,10 +15,10 @@ import (
 	"github.com/cobola/seaf-cli-macos/internal/config"
 )
 
-// --- sync (纯 API 实现，不依赖 Python) ---
+// --- sync (通过 seaf-daemon RPC，不走 REST API) ---
 var syncCmd = &cobra.Command{
 	Use:   "sync <资料库名或ID> <本地目录>",
-	Short: "同步资料库到本地目录",
+	Short: "同步资料库到本地目录（使用 seaf-daemon 块同步协议）",
 	Args:  cobra.ExactArgs(2),
 	RunE:  runSync,
 }
@@ -31,6 +32,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	libraryID := args[0]
 	localDir := args[1]
 
+	// 如果传入的是名字而非 ID，先查找 ID
 	if !strings.Contains(libraryID, "-") {
 		id, err := findRepoIDByName(cfg, libraryID)
 		if err != nil {
@@ -39,18 +41,134 @@ func runSync(cmd *cobra.Command, args []string) error {
 		libraryID = id
 	}
 
-	// 创建本地目录
+	// 确保本地目录存在
 	if err := os.MkdirAll(localDir, 0755); err != nil {
 		return fmt.Errorf("创建本地目录失败: %w", err)
 	}
 
-	fmt.Printf("同步 %s → %s\n", libraryID, localDir)
-	if err := downloadDir(cfg, libraryID, "/", localDir); err != nil {
+	// 从服务器获取 download info
+	downloadInfo, err := getDownloadInfo(cfg, libraryID)
+	if err != nil {
+		return fmt.Errorf("获取下载信息失败: %w", err)
+	}
+
+	// 连接 seaf-daemon
+	socketPath := findSearpcSocket()
+	if socketPath == "" {
+		return fmt.Errorf("未找到 seaf-daemon socket，请先运行 seaf-cli start")
+	}
+
+	client, err := newSearpcClient(socketPath)
+	if err != nil {
 		return err
+	}
+	defer client.close()
+
+	// 配置服务器信息
+	client.call("seafile_set_config", "url", cfg.Server)
+	client.call("seafile_set_config", "token", cfg.Token)
+
+	// 构造 more_info
+	moreInfo := map[string]interface{}{
+		"server_url":  cfg.Server,
+		"is_readonly": 0,
+	}
+	if downloadInfo.RepoSalt != "" {
+		moreInfo["repo_salt"] = downloadInfo.RepoSalt
+	}
+	moreInfoJSON, _ := json.Marshal(moreInfo)
+
+	// 调用 seafile_download
+	// enc_version 默认为 1（seafile-client 源码: dict.value("enc_version", 1).toInt()）
+	encVersion := downloadInfo.EncVersion
+	if encVersion == 0 {
+		encVersion = 1
+	}
+	_, err = client.call("seafile_download",
+		libraryID,              // repo_id
+		downloadInfo.RepoVersion, // repo_version
+		downloadInfo.RepoName,   // name
+		localDir,               // wt_parent
+		downloadInfo.Token,     // token
+		"",                     // password
+		downloadInfo.Magic,     // magic
+		downloadInfo.Email,     // email
+		downloadInfo.RandomKey, // random_key
+		encVersion,             // enc_version
+		string(moreInfoJSON),   // more_info
+	)
+	if err != nil {
+		return fmt.Errorf("同步失败: %w", err)
 	}
 
 	// 保存同步记录
-	return saveSyncRecord(libraryID, libraryID, localDir)
+	saveSyncRecord(libraryID, downloadInfo.RepoName, localDir)
+
+	fmt.Printf("✓ 已启动同步: %s → %s\n", downloadInfo.RepoName, localDir)
+	fmt.Println("使用 seaf-cli status 查看同步状态")
+	return nil
+}
+
+type downloadInfo struct {
+	RepoName    string
+	RepoVersion int
+	Token       string
+	Email       string
+	Encrypted   bool
+	Magic       string
+	EncVersion  int
+	RandomKey   string
+	RepoSalt    string
+	Permission  string
+}
+
+func getDownloadInfo(cfg *config.Config, repoID string) (*downloadInfo, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	url := fmt.Sprintf("%s/api2/repos/%s/download-info/", cfg.Server, repoID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Token "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var info downloadInfo
+	var raw struct {
+		RepoName    string `json:"repo_name"`
+		RepoVersion int    `json:"repo_version"`
+		Token       string `json:"token"`
+		Email       string `json:"email"`
+		Encrypted   interface{} `json:"encrypted"`
+		Magic       string `json:"magic"`
+		EncVersion  int    `json:"enc_version"`
+		RandomKey   string `json:"random_key"`
+		Salt        string `json:"salt"`
+		Permission  string `json:"permission"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+
+	info.RepoName = raw.RepoName
+	info.RepoVersion = raw.RepoVersion
+	info.Token = raw.Token
+	info.Email = raw.Email
+	if v, ok := raw.Encrypted.(bool); ok {
+		info.Encrypted = v
+	} else if v, ok := raw.Encrypted.(float64); ok {
+		info.Encrypted = v != 0
+	}
+	info.Magic = raw.Magic
+	info.EncVersion = raw.EncVersion
+	info.RandomKey = raw.RandomKey
+	info.RepoSalt = raw.Salt
+	info.Permission = raw.Permission
+	return &info, nil
 }
 
 func saveSyncRecord(id, name, path string) error {
@@ -125,7 +243,8 @@ func downloadDir(cfg *config.Config, repoID, remotePath, localDir string) error 
 
 func listDir(cfg *config.Config, repoID, dir string) ([]dirEntry, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	url := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, dir)
+	encodedDir := url.PathEscape(dir)
+	url := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Token "+cfg.Token)
 	resp, err := client.Do(req)
@@ -145,7 +264,8 @@ func listDir(cfg *config.Config, repoID, dir string) ([]dirEntry, error) {
 
 func downloadFile(cfg *config.Config, repoID, remotePath, localPath string) error {
 	client := &http.Client{Timeout: 10 * time.Minute}
-	url := fmt.Sprintf("%s/api2/repos/%s/file/?p=%s", cfg.Server, repoID, remotePath)
+	encodedPath := url.PathEscape(remotePath)
+	url := fmt.Sprintf("%s/api2/repos/%s/file/?p=%s", cfg.Server, repoID, encodedPath)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Token "+cfg.Token)
 	resp, err := client.Do(req)
