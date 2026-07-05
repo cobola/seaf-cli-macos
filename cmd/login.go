@@ -406,9 +406,9 @@ body{font-family:"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;bac
       </div>
       <button class="login-btn" id="manualBtn" onclick="doManualToken()">验证并登录</button>
       <div class="note" style="margin-top:16px">
-        <strong>单点登录？</strong>输入服务器地址后点击下方按钮，在浏览器中完成登录，获取 api token 后粘贴到上方
+        <strong>单点登录？</strong>输入服务器地址后点击下方按钮，在浏览器中生成 token，复制粘贴到上方
       </div>
-      <button class="login-btn" style="background:#1677ff;margin-top:12px" onclick="openBrowser()">打开服务器登录页面</button>
+      <button class="login-btn" style="background:#1677ff;margin-top:12px" onclick="openBrowser()">打开 API Token 设置页</button>
     </div>
 
     <div id="status"></div>
@@ -498,7 +498,7 @@ async function doManualToken(){
 async function openBrowser(){
   var server=normalize(document.getElementById('server').value);
   if(!server){alert('请先填写服务器地址');return}
-  window.open(server, '_blank');
+  window.open(server+'/profile/tokens/', '_blank');
 }
 
 document.getElementById('password').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
