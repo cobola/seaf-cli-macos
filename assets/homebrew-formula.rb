@@ -6,15 +6,15 @@
 
 class SeafCliMacos < Formula
   desc "macOS version of Seafile CLI - command line sync tool"
-  homepage "https://github.com/your-username/seaf-cli-macos"
+  homepage "https://github.com/cobola/seaf-cli-macos"
   version "0.1.0"
 
   # 架构检测
   if Hardware::CPU.arm?
-    url "https://github.com/your-username/seaf-cli-macos/releases/download/v0.1.0/seaf-cli-macos-0.1.0-arm64.tar.gz"
+    url "https://github.com/cobola/seaf-cli-macos/releases/download/v0.1.0/seaf-cli-macos-0.1.0-arm64.tar.gz"
     sha256 "YOUR_ARM64_SHA256_HERE"
   else
-    url "https://github.com/your-username/seaf-cli-macos/releases/download/v0.1.0/seaf-cli-macos-0.1.0-x86_64.tar.gz"
+    url "https://github.com/cobola/seaf-cli-macos/releases/download/v0.1.0/seaf-cli-macos-0.1.0-x86_64.tar.gz"
     sha256 "YOUR_X86_64_SHA256_HERE"
   end
 

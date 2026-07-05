@@ -1,4 +1,4 @@
-module github.com/your-username/seaf-cli-macos
+module github.com/cobola/seaf-cli-macos
 
 go 1.21
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/your-username/seaf-cli-macos/cmd"
+	"github.com/cobola/seaf-cli-macos/cmd"
 )
 
 var version = "dev"

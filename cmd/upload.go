@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/your-username/seaf-cli-macos/internal/config"
+	"github.com/cobola/seaf-cli-macos/internal/config"
 )
 
 var uploadCmd = &cobra.Command{

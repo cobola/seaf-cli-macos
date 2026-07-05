@@ -95,7 +95,7 @@ brew install go
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-username/seaf-cli-macos.git
+git clone https://github.com/cobola/seaf-cli-macos.git
 cd seaf-cli-macos
 
 # 编译
@@ -172,7 +172,7 @@ go test -v ./cmd/...
 如有任何问题，请通过以下方式联系：
 
 1. 创建 Issue
-2. 发送邮件到：your-email@example.com
+2. 发送邮件到：cobola@gmail.com
 3. 加入讨论群：xxx
 
 感谢你的贡献！

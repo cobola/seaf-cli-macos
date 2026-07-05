@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/your-username/seaf-cli-macos/internal/config"
+	"github.com/cobola/seaf-cli-macos/internal/config"
 )
 
 var initCmd = &cobra.Command{
