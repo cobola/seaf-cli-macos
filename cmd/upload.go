@@ -150,6 +150,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 			} else {
 				created++
 			}
+			time.Sleep(100 * time.Millisecond)
 		}
 		fmt.Printf("  %d 新建, %d 已存在, %d 失败\n\n", created, skipped, failed)
 	}
@@ -161,8 +162,9 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		fmt.Printf("服务器已有 %d 个文件\n", len(existingFiles))
 	}
 
-	// 逐个上传（每个文件获取对应的 upload link）
+	// 逐个上传（缓存 upload link，同目录复用）
 	success, skip, fail := 0, 0, 0
+	linkCache := make(map[string]string)
 	for i, filePath := range files {
 		relPath, _ := filepath.Rel(localDir, filePath)
 		percent := float64(i+1) / float64(len(files)) * 100
@@ -180,12 +182,18 @@ func runUpload(cmd *cobra.Command, args []string) error {
 			fileRemoteDir = remoteDir + "/" + filepath.ToSlash(relDir)
 		}
 
-		// 获取该目录的 upload link
-		fileUploadLink, err := getUploadLink(cfg, repoID, fileRemoteDir)
-		if err != nil {
-			fmt.Printf("[%d/%d %.0f%%] %s\n  ✗ 获取上传链接失败: %v\n", i+1, len(files), percent, relPath, err)
-			fail++
-			continue
+		// 从缓存获取或新获取 upload link
+		fileUploadLink, ok := linkCache[fileRemoteDir]
+		if !ok {
+			var err error
+			fileUploadLink, err = getUploadLink(cfg, repoID, fileRemoteDir)
+			if err != nil {
+				fmt.Printf("[%d/%d %.0f%%] %s\n  ✗ 获取上传链接失败: %v\n", i+1, len(files), percent, relPath, err)
+				fail++
+				continue
+			}
+			linkCache[fileRemoteDir] = fileUploadLink
+			time.Sleep(200 * time.Millisecond)
 		}
 
 		fmt.Printf("[%d/%d %.0f%%] %s\n", i+1, len(files), percent, relPath)
@@ -195,6 +203,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		} else {
 			success++
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	fmt.Printf("\n完成: %d 成功", success)
