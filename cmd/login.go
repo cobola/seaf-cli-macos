@@ -498,7 +498,7 @@ async function doManualToken(){
 async function openBrowser(){
   var server=normalize(document.getElementById('server').value);
   if(!server){alert('请先填写服务器地址');return}
-  window.open(server+'/profile/tokens/', '_blank');
+  window.open(server+'/profile', '_blank');
 }
 
 document.getElementById('password').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
