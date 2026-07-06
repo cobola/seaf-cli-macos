@@ -20,6 +20,22 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 }
 
+// padRight 用空格填充到指定显示宽度（中文字符占2列）
+func padRight(s string, width int) string {
+	drawWidth := 0
+	for _, r := range s {
+		if r > 0x7F {
+			drawWidth += 2
+		} else {
+			drawWidth++
+		}
+	}
+	if drawWidth >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-drawWidth)
+}
+
 func runList(cmd *cobra.Command, args []string) error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -40,13 +56,13 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	var repos []struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Size     int64  `json:"size"`
-		Perm     string `json:"permission"`
-		Owner    string `json:"owner_name"`
-		MTime    int64  `json:"mtime"`
-		Encrypted bool  `json:"encrypted"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Size      int64  `json:"size"`
+		Perm      string `json:"permission"`
+		Owner     string `json:"owner_name"`
+		MTime     int64  `json:"mtime"`
+		Encrypted bool   `json:"encrypted"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&repos); err != nil {
 		return fmt.Errorf("解析响应失败: %w", err)
@@ -57,16 +73,28 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-30s %-8s %-10s %-20s\n", "名称", "权限", "大小", "所有者")
-	fmt.Println(strings.Repeat("-", 72))
+	// 表头
+	fmt.Printf(" %s  %s  %s  %s\n",
+		padRight("名称", 32),
+		padRight("权限", 8),
+		padRight("大小", 10),
+		padRight("所有者", 20))
+	fmt.Println(strings.Repeat("─", 75))
+
+	// 内容
 	for _, r := range repos {
 		size := formatSize(r.Size)
 		perm := r.Perm
 		if r.Encrypted {
 			perm += " 🔒"
 		}
-		fmt.Printf("%-30s %-8s %-10s %-20s\n", r.Name, perm, size, r.Owner)
+		fmt.Printf(" %s  %s  %s  %s\n",
+			padRight(r.Name, 32),
+			padRight(perm, 8),
+			padRight(size, 10),
+			padRight(r.Owner, 20))
 	}
+
 	fmt.Printf("\n共 %d 个资料库\n", len(repos))
 	return nil
 }
