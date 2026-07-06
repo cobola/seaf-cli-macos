@@ -295,7 +295,7 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 		return nil
 	})
 
-	// 递归获取已存在文件（name -> size）
+	// 递归获取已存在文件（相对路径 -> size）
 	existingFiles := make(map[string]int64)
 	var checkDir func(dir string)
 	checkDir = func(dir string) {
@@ -319,8 +319,12 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 		}
 		json.NewDecoder(resp.Body).Decode(&entries)
 		for _, e := range entries {
+			rel := strings.TrimPrefix(dir+"/"+e.Name, remoteDir)
+			if rel != "" && rel[0] == '/' {
+				rel = rel[1:]
+			}
 			if e.Type == "file" {
-				existingFiles[dir+"/"+e.Name] = e.Size
+				existingFiles[rel] = e.Size
 			} else if e.Type == "dir" {
 				checkDir(dir + "/" + e.Name)
 			}
@@ -333,6 +337,15 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 	success, skip, fail := 0, 0, 0
 	wafRetries := 0
 	maxRetries := 3
+
+	// 快速列出已跳过的文件（不请求 API）
+	if len(existingFiles) > 0 {
+		fmt.Printf("\n%s 已跳过 %d 个文件：\n", style.Success("✓"), len(existingFiles))
+		for name := range existingFiles {
+			fmt.Printf("  ⏭ %s\n", name)
+		}
+		fmt.Println()
+	}
 
 	for i, filePath := range allFiles {
 		relPath, _ := filepath.Rel(localDir, filePath)
