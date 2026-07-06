@@ -430,7 +430,6 @@ func runUpload(cmd *cobra.Command, args []string) error {
 // --- 辅助函数 ---
 
 func createRemoteDir(cfg *config.Config, repoID, dir string) error {
-	// dir 是库内路径，如 "/2022方正字库/1.黑体"
 	if dir == "" || dir == "/" {
 		return nil
 	}
@@ -438,6 +437,10 @@ func createRemoteDir(cfg *config.Config, repoID, dir string) error {
 	current := ""
 	for _, part := range parts {
 		current += "/" + part
+		// 先检查目录是否已存在
+		if dirExists(cfg, repoID, current) {
+			continue
+		}
 		encodedDir := url.PathEscape(current)
 		client := &http.Client{Timeout: 15 * time.Second}
 		apiURL := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
@@ -449,7 +452,6 @@ func createRemoteDir(cfg *config.Config, repoID, dir string) error {
 			return err
 		}
 		resp.Body.Close()
-		// 忽略错误（目录可能已存在，Seafile 会返回 400/409）
 	}
 	return nil
 }
