@@ -1,17 +1,12 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
-	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/cobola/seaf-cli-macos/internal/config"
@@ -20,20 +15,15 @@ import (
 var uploadCmd = &cobra.Command{
 	Use:   "upload <本地目录> <库内路径>",
 	Short: "上传文件到 Seafile 资料库",
-	Long: `将本地目录的文件上传到指定资料库的指定路径
+	Long: `将本地目录的文件上传到指定资料库。
 
-模式说明：
-  merge   合并上传（默认），已存在文件覆盖，新文件追加
-  skip    跳过已存在的文件，只上传新文件
-  overwrite  清空目标目录后重新上传`,
+通过 seaf-daemon 块同步协议上传，不走 REST API。
+原理：设置同步关系 → 复制文件到本地同步目录 → seaf-daemon 自动上传。`,
 	Args: cobra.ExactArgs(2),
 	RunE: runUpload,
 }
 
-var uploadMode string
-
 func init() {
-	uploadCmd.Flags().StringVarP(&uploadMode, "mode", "m", "merge", "上传模式: merge/skip/overwrite")
 	rootCmd.AddCommand(uploadCmd)
 }
 
@@ -41,25 +31,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	localDir := args[0]
 	remotePath := args[1]
 
-	// 校验模式
-	if uploadMode != "merge" && uploadMode != "skip" && uploadMode != "overwrite" {
-		return fmt.Errorf("无效的模式: %s，可选: merge, skip, overwrite", uploadMode)
-	}
-
-	// 读取配置
-	rootDir := initRootDir
-	if rootDir == "" {
-		rootDir = config.GetDefaultRootDir()
-	}
-	cfg := config.NewConfig(rootDir)
-	if err := cfg.Load(); err != nil {
-		return fmt.Errorf("未登录，请先执行 seaf-cli login")
-	}
-	if cfg.Server == "" || cfg.Token == "" {
-		return fmt.Errorf("未登录，请先执行 seaf-cli login")
-	}
-
-	// 检查本地目录
+	// 校验本地目录
 	info, err := os.Stat(localDir)
 	if err != nil {
 		return fmt.Errorf("本地路径不存在: %s", localDir)
@@ -68,345 +40,211 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("本地路径不是目录: %s", localDir)
 	}
 
-	// 获取资料库
-	repoID, err := findRepo(cfg, remotePath)
+	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 
-	// 提取库内目录路径
-	remoteDir := "/" + remotePath
+	// 解析远程路径: "公共软件" 或 "公共软件/子目录"
 	parts := strings.SplitN(remotePath, "/", 2)
+	repoName := parts[0]
+	subPath := ""
 	if len(parts) > 1 {
-		remoteDir = "/" + parts[1]
+		subPath = parts[1]
 	}
 
-	// overwrite 模式：先清空目标目录
-	if uploadMode == "overwrite" {
-		fmt.Printf("清空目标目录: %s\n", remoteDir)
-		if err := deleteDir(cfg, repoID, remoteDir); err != nil {
-			fmt.Printf("  清空失败（可能目录不存在）: %v\n", err)
-		}
+	// 查找资料库 ID
+	repoID, err := findRepoIDByName(cfg, repoName)
+	if err != nil {
+		return err
 	}
 
-	// 收集所有文件
-	var files []string
-	filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+	// 查找本地同步目录
+	syncDir := findLocalSyncDir(repoID)
+	if syncDir == "" {
+		// 没有同步关系，先设置同步
+		fmt.Printf("设置同步关系: %s\n", repoName)
+		syncDir, err = setupSync(cfg, repoID, repoName)
 		if err != nil {
-			return nil
-		}
-		if !info.IsDir() {
-			files = append(files, path)
-		}
-		return nil
-	})
-
-	fmt.Printf("库: %s\n", remotePath)
-	fmt.Printf("模式: %s\n", uploadMode)
-	fmt.Printf("本地目录: %s\n", localDir)
-	fmt.Printf("共 %d 个文件\n\n", len(files))
-
-	// 收集并创建缺失的目录
-	dirSet := make(map[string]bool)
-	for _, filePath := range files {
-		relPath, _ := filepath.Rel(localDir, filePath)
-		relDir := filepath.Dir(relPath)
-		if relDir != "." {
-			dirSet[remoteDir+"/"+filepath.ToSlash(relDir)] = true
+			return fmt.Errorf("设置同步失败: %w", err)
 		}
 	}
-	var dirs []string
-	for dir := range dirSet {
-		dirs = append(dirs, dir)
-	}
-	// 按深度排序，确保父目录先创建
-	sort.Slice(dirs, func(i, j int) bool {
-		return strings.Count(dirs[i], "/") < strings.Count(dirs[j], "/")
-	})
 
-	if len(dirs) > 0 {
-		fmt.Printf("创建 %d 个目录...\n", len(dirs))
-		created, skipped, failed := 0, 0, 0
-		for _, dir := range dirs {
-			// 先查询父目录，看子目录是否已存在
-			parent := filepath.Dir(dir)
-			child := filepath.Base(dir)
-			existingChildren, err := listRemoteDirs(cfg, repoID, parent)
-			if err == nil {
-				exists := false
-				for _, c := range existingChildren {
-					if c == child {
-						exists = true
-						break
-					}
-				}
-				if exists {
-					skipped++
-					continue
-				}
-			}
-			if err := createDir(cfg, repoID, dir); err != nil {
-				failed++
-			} else {
-				created++
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		fmt.Printf("  %d 新建, %d 已存在, %d 失败\n\n", created, skipped, failed)
+	// 目标目录：同步根目录/库名/子路径
+	targetDir := filepath.Join(syncDir, repoName, subPath)
+
+	// 确保目标目录存在
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("创建目标目录失败: %w", err)
 	}
 
-	// 获取已有文件列表（skip 模式用）
-	var existingFiles map[string]bool
-	if uploadMode == "skip" {
-		existingFiles, _ = listRemoteFiles(cfg, repoID, remoteDir)
-		fmt.Printf("服务器已有 %d 个文件\n", len(existingFiles))
+	// 复制文件到同步目录
+	fmt.Printf("复制文件: %s → %s\n", localDir, targetDir)
+	if err := copyDir(localDir, targetDir); err != nil {
+		return fmt.Errorf("复制文件失败: %w", err)
 	}
 
-	// 逐个上传（缓存 upload link，同目录复用）
-	success, skip, fail := 0, 0, 0
-	linkCache := make(map[string]string)
-	for i, filePath := range files {
-		relPath, _ := filepath.Rel(localDir, filePath)
-		percent := float64(i+1) / float64(len(files)) * 100
+	fmt.Printf("✓ 文件已复制到同步目录\n")
 
-		// skip 模式：跳过已存在的文件
-		if uploadMode == "skip" && existingFiles[relPath] {
-			skip++
-			continue
-		}
-
-		// 计算该文件所在的远程目录
-		relDir := filepath.Dir(relPath)
-		fileRemoteDir := remoteDir
-		if relDir != "." {
-			fileRemoteDir = remoteDir + "/" + filepath.ToSlash(relDir)
-		}
-
-		// 从缓存获取或新获取 upload link
-		fileUploadLink, ok := linkCache[fileRemoteDir]
-		if !ok {
-			var err error
-			fileUploadLink, err = getUploadLink(cfg, repoID, fileRemoteDir)
-			if err != nil {
-				fmt.Printf("[%d/%d %.0f%%] %s\n  ✗ 获取上传链接失败: %v\n", i+1, len(files), percent, relPath, err)
-				fail++
-				continue
-			}
-			linkCache[fileRemoteDir] = fileUploadLink
-			time.Sleep(200 * time.Millisecond)
-		}
-
-		fmt.Printf("[%d/%d %.0f%%] %s\n", i+1, len(files), percent, relPath)
-		if err := uploadFile(cfg, fileUploadLink, fileRemoteDir, localDir, filePath); err != nil {
-			fmt.Printf("  ✗ 失败: %v\n", err)
-			fail++
-		} else {
-			success++
-		}
-		time.Sleep(500 * time.Millisecond)
+	// 触发 seaf-daemon 立即同步
+	fmt.Println("触发同步...")
+	if err := triggerSync(repoID); err != nil {
+		fmt.Printf("  触发同步失败: %v（seaf-daemon 会自动重试）\n", err)
 	}
 
-	fmt.Printf("\n完成: %d 成功", success)
-	if skip > 0 {
-		fmt.Printf(", %d 跳过", skip)
-	}
-	if fail > 0 {
-		fmt.Printf(", %d 失败", fail)
-	}
-	fmt.Println()
+	fmt.Println("seaf-daemon 将自动上传变更，使用 seaf-cli status 查看进度")
 	return nil
 }
 
-func findRepo(cfg *config.Config, remotePath string) (string, error) {
-	repoName := strings.Split(remotePath, "/")[0]
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, _ := http.NewRequest("GET", cfg.Server+"/api2/repos/", nil)
-	req.Header.Set("Authorization", "Token "+cfg.Token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("连接服务器失败: %w", err)
+func triggerSync(repoID string) error {
+	socketPath := findSearpcSocket()
+	if socketPath == "" {
+		return fmt.Errorf("seaf-daemon 未运行")
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("获取资料库列表失败 (HTTP %d)", resp.StatusCode)
+	client, err := newSearpcClient(socketPath)
+	if err != nil {
+		return err
+	}
+	defer client.close()
+
+	// 启用自动同步
+	client.call("seafile_set_config", "auto_sync", "true")
+
+	// 触发立即同步
+	_, err = client.call("seafile_sync", repoID, "")
+	return err
+}
+
+func findLocalSyncDir(repoID string) string {
+	rootDir := initRootDir
+	if rootDir == "" {
+		rootDir = config.GetDefaultRootDir()
+	}
+
+	syncFile := filepath.Join(rootDir, "synced-repos.json")
+	data, err := os.ReadFile(syncFile)
+	if err != nil {
+		return ""
 	}
 
 	var repos []struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
+		Path string `json:"path"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&repos); err != nil {
-		return "", fmt.Errorf("解析响应失败: %w", err)
+	if err := json.Unmarshal(data, &repos); err != nil {
+		return ""
 	}
 
 	for _, r := range repos {
-		if r.Name == repoName {
-			return r.ID, nil
+		if r.ID == repoID {
+			return r.Path
 		}
 	}
-	return "", fmt.Errorf("未找到资料库: %s", repoName)
+	return ""
 }
 
-func createDir(cfg *config.Config, repoID, dir string) error {
-	client := &http.Client{Timeout: 15 * time.Second}
-	url := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, dir)
-	req, _ := http.NewRequest("POST", url, strings.NewReader("operation=mkdir"))
-	req.Header.Set("Authorization", "Token "+cfg.Token)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
-}
-
-func deleteDir(cfg *config.Config, repoID, dir string) error {
-	client := &http.Client{Timeout: 15 * time.Second}
-	url := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, dir)
-	req, _ := http.NewRequest("DELETE", url, nil)
-	req.Header.Set("Authorization", "Token "+cfg.Token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
-}
-
-func listRemoteFiles(cfg *config.Config, repoID, dir string) (map[string]bool, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	url := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, dir)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Token "+cfg.Token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var entries []struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-		return nil, err
+func setupSync(cfg *config.Config, repoID, repoName string) (string, error) {
+	// 确定同步目录
+	syncDir := filepath.Join(config.GetDefaultRootDir(), "synced", repoName)
+	if err := os.MkdirAll(syncDir, 0755); err != nil {
+		return "", err
 	}
 
-	files := make(map[string]bool)
-	for _, e := range entries {
-		if e.Type == "file" {
-			files[e.Name] = true
-		}
-	}
-	return files, nil
-}
-
-func listRemoteDirs(cfg *config.Config, repoID, dir string) ([]string, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	url := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, dir)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Token "+cfg.Token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	// 通过 RPC 设置同步
+	socketPath := findSearpcSocket()
+	if socketPath == "" {
+		return "", fmt.Errorf("seaf-daemon 未运行，请先执行 seaf-cli start")
 	}
 
-	var entries []struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-		return nil, err
-	}
-
-	var dirs []string
-	for _, e := range entries {
-		if e.Type == "dir" {
-			dirs = append(dirs, e.Name)
-		}
-	}
-	return dirs, nil
-}
-
-func getUploadLink(cfg *config.Config, repoID, dir string) (string, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	url := fmt.Sprintf("%s/api2/repos/%s/upload-link/?p=%s", cfg.Server, repoID, dir)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Token "+cfg.Token)
-	resp, err := client.Do(req)
+	client, err := newSearpcClient(socketPath)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer client.close()
 
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	client.call("seafile_set_config", "url", cfg.Server)
+	client.call("seafile_set_config", "token", cfg.Token)
+
+	// 获取 download info
+	downloadInfo, err := getDownloadInfo(cfg, repoID)
+	if err != nil {
+		return "", err
 	}
 
-	// 响应可能是带引号的字符串 "https://..."
-	link := strings.Trim(string(body), `"`)
-	return link, nil
+	encVersion := downloadInfo.EncVersion
+	if encVersion == 0 {
+		encVersion = 1
+	}
+
+	var passwd interface{} = nil
+	moreInfo := map[string]interface{}{
+		"server_url":  cfg.Server,
+		"is_readonly": 0,
+	}
+	if downloadInfo.RepoSalt != "" {
+		moreInfo["repo_salt"] = downloadInfo.RepoSalt
+	}
+	moreInfoJSON, _ := json.Marshal(moreInfo)
+
+	_, err = client.call("seafile_download",
+		repoID,
+		downloadInfo.RepoVersion,
+		downloadInfo.RepoName,
+		syncDir,
+		downloadInfo.Token,
+		passwd,
+		downloadInfo.Magic,
+		downloadInfo.Email,
+		downloadInfo.RandomKey,
+		encVersion,
+		string(moreInfoJSON),
+	)
+	if err != nil {
+		return "", err
+	}
+
+	// 保存同步记录
+	saveSyncRecord(repoID, repoName, syncDir)
+	return syncDir, nil
 }
 
-func uploadFile(cfg *config.Config, uploadLink, remoteDir, localDir, filePath string) error {
-	file, err := os.Open(filePath)
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, _ := filepath.Rel(src, path)
+		dstPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, 0755)
+		}
+
+		// 跳过已存在且大小相同的文件
+		if dstInfo, err := os.Stat(dstPath); err == nil && dstInfo.Size() == info.Size() {
+			return nil
+		}
+
+		return copyFile(path, dstPath)
+	})
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer in.Close()
 
-	relPath, _ := filepath.Rel(localDir, filePath)
-	relDir := filepath.Dir(relPath)
-	uploadDir := remoteDir
-	if relDir != "." {
-		uploadDir = remoteDir + "/" + filepath.ToSlash(relDir)
-	}
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	writer.WriteField("parent_dir", uploadDir)
-	writer.WriteField("replace", "1")
-
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(part, file); err != nil {
-		return err
-	}
-	writer.Close()
+	defer out.Close()
 
-	client := &http.Client{Timeout: 5 * time.Minute}
-	req, _ := http.NewRequest("POST", uploadLink, &body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Token "+cfg.Token)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-	return nil
+	_, err = io.Copy(out, in)
+	return err
 }
