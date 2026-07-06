@@ -295,8 +295,39 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 		return nil
 	})
 
-	// 获取已存在文件（name -> size）
-	existingFiles := listRemoteFilesWithSize(cfg, repoID, remoteDir)
+	// 递归获取已存在文件（name -> size）
+	existingFiles := make(map[string]int64)
+	var checkDir func(dir string)
+	checkDir = func(dir string) {
+		encodedDir := url.PathEscape(dir)
+		client := &http.Client{Timeout: 30 * time.Second}
+		apiURL := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
+		req, _ := http.NewRequest("GET", apiURL, nil)
+		req.Header.Set("Authorization", "Token "+cfg.Token)
+		resp, err := client.Do(req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return
+		}
+		var entries []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+		}
+		json.NewDecoder(resp.Body).Decode(&entries)
+		for _, e := range entries {
+			if e.Type == "file" {
+				existingFiles[dir+"/"+e.Name] = e.Size
+			} else if e.Type == "dir" {
+				checkDir(dir + "/" + e.Name)
+			}
+		}
+	}
+	checkDir(remoteDir)
+	fmt.Printf("  服务器已有 %d 个文件\n", len(existingFiles))
 
 	linkCache := make(map[string]string)
 	success, skip, fail := 0, 0, 0
