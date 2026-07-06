@@ -295,7 +295,8 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 		return nil
 	})
 
-	existingFiles, _ := listRemoteFiles(cfg, repoID, remoteDir)
+	// 获取已存在文件（name -> size）
+	existingFiles := listRemoteFilesWithSize(cfg, repoID, remoteDir)
 
 	linkCache := make(map[string]string)
 	success, skip, fail := 0, 0, 0
@@ -306,9 +307,13 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 		relPath, _ := filepath.Rel(localDir, filePath)
 		percent := float64(i+1) / float64(len(allFiles)) * 100
 
-		if existingFiles[relPath] {
-			skip++
-			continue
+		// 跳过同名同大小的文件（断点续传）
+		if remoteSize, ok := existingFiles[relPath]; ok {
+			localInfo, _ := os.Stat(filePath)
+			if localInfo != nil && localInfo.Size() == remoteSize {
+				skip++
+				continue
+			}
 		}
 
 		relDir := filepath.Dir(relPath)
@@ -496,6 +501,38 @@ func dirExists(cfg *config.Config, repoID, dir string) bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+func listRemoteFilesWithSize(cfg *config.Config, repoID, dir string) map[string]int64 {
+	encodedDir := url.PathEscape(dir)
+	client := &http.Client{Timeout: 30 * time.Second}
+	apiURL := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	req.Header.Set("Authorization", "Token "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return make(map[string]int64)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return make(map[string]int64)
+	}
+
+	var entries []struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+		Size int64  `json:"size"`
+	}
+	json.NewDecoder(resp.Body).Decode(&entries)
+
+	files := make(map[string]int64)
+	for _, e := range entries {
+		if e.Type == "file" {
+			files[e.Name] = e.Size
+		}
+	}
+	return files
 }
 
 func listRemoteFiles(cfg *config.Config, repoID, dir string) (map[string]bool, error) {
