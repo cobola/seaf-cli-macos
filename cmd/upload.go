@@ -233,6 +233,11 @@ func copyDir(src, dst string) error {
 }
 
 func copyFile(src, dst string) error {
+	// 优先使用硬链接（不占额外空间，同文件系统有效）
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	// 硬链接失败（跨文件系统），回退到复制
 	in, err := os.Open(src)
 	if err != nil {
 		return err
