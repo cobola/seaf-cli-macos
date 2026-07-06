@@ -58,5 +58,5 @@ func findRepoIDByName(cfg *config.Config, name string) (string, error) {
 			return r.ID, nil
 		}
 	}
-	return "", fmt.Errorf("未找到资料库: %s", name)
+	return "", fmt.Errorf("未找到资料库: %s\n请先在网页上创建该资料库，或使用 seaf-cli list 查看已有资料库", name)
 }

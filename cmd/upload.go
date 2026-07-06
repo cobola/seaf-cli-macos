@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/cobola/seaf-cli-macos/internal/config"
+	"github.com/cobola/seaf-cli-macos/internal/style"
 )
 
 var uploadCmd = &cobra.Command{
@@ -33,10 +34,16 @@ var uploadCmd = &cobra.Command{
 	RunE: runUpload,
 }
 
-var strategy string
+var (
+	strategy  string
+	excludeP  string
+)
+
+var defaultExclude = []string{".DS_Store", "desktop.ini", "Thumbs.db", "._*", "*.sbak"}
 
 func init() {
 	uploadCmd.Flags().StringVarP(&strategy, "strategy", "s", "auto", "上传策略: auto/zip/direct")
+	uploadCmd.Flags().StringVarP(&excludeP, "exclude", "e", "", "排除文件模式（逗号分隔，默认排除 .DS_Store desktop.ini）")
 	rootCmd.AddCommand(uploadCmd)
 }
 
@@ -51,7 +58,7 @@ type dirAnalysis struct {
 	FileTypes  map[string]int
 }
 
-func scanDir(root string) *dirAnalysis {
+func scanDir(root string, excludes []string) *dirAnalysis {
 	a := &dirAnalysis{FileTypes: make(map[string]int)}
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -59,6 +66,10 @@ func scanDir(root string) *dirAnalysis {
 		}
 		if info.IsDir() {
 			a.DirCount++
+			return nil
+		}
+		// 检查排除列表
+		if isExcluded(path, excludes) {
 			return nil
 		}
 		a.FileCount++
@@ -79,14 +90,39 @@ func scanDir(root string) *dirAnalysis {
 	return a
 }
 
-func printAnalysis(a *dirAnalysis, localDir string) {
-	fmt.Println("分析结果:")
-	fmt.Printf("  总大小: %s | 文件: %d | 目录: %d\n", formatSize(a.TotalSize), a.FileCount, a.DirCount)
+func isExcluded(path string, excludes []string) bool {
+	name := filepath.Base(path)
+	for _, pattern := range excludes {
+		if strings.HasPrefix(pattern, ".*") {
+			// 通配符匹配
+			if matched, _ := filepath.Match(pattern, name); matched {
+				return true
+			}
+		} else if name == pattern {
+			return true
+		}
+	}
+	return false
+}
+
+func getExcludes() []string {
+	if excludeP != "" {
+		return strings.Split(excludeP, ",")
+	}
+	return defaultExclude
+}
+
+func printAnalysis(a *dirAnalysis, localDir string, excludes []string) {
+	fmt.Println(style.Title.Render("📊 分析结果"))
+	fmt.Printf("  总大小: %s | 文件: %s | 目录: %s\n",
+		style.Progress.Render(formatSize(a.TotalSize)),
+		style.Num.Render(fmt.Sprintf("%d", a.FileCount)),
+		style.Num.Render(fmt.Sprintf("%d", a.DirCount)))
 
 	// 大小分布
 	var small, mid, large int
 	filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil || info.IsDir() || isExcluded(path, excludes) {
 			return nil
 		}
 		switch {
@@ -100,10 +136,10 @@ func printAnalysis(a *dirAnalysis, localDir string) {
 		return nil
 	})
 	if a.FileCount > 0 {
-		fmt.Printf("  大小分布: <100KB: %d (%.0f%%) | 100KB-1MB: %d (%.0f%%) | >1MB: %d (%.0f%%)\n",
-			small, float64(small)*100/float64(a.FileCount),
-			mid, float64(mid)*100/float64(a.FileCount),
-			large, float64(large)*100/float64(a.FileCount))
+		fmt.Printf("  大小分布: %s %d (%.0f%%) | %s %d (%.0f%%) | %s %d (%.0f%%)\n",
+			style.Info.Render("<100KB"), small, float64(small)*100/float64(a.FileCount),
+			style.Info.Render("100KB-1MB"), mid, float64(mid)*100/float64(a.FileCount),
+			style.Info.Render(">1MB"), large, float64(large)*100/float64(a.FileCount))
 	}
 
 	// 文件类型
@@ -133,35 +169,30 @@ func chooseStrategy(a *dirAnalysis) string {
 		return strategy
 	}
 
-	// 检查本地可用空间
 	var stat syscall.Statfs_t
 	syscall.Statfs(".", &stat)
 	diskFree := stat.Bavail * uint64(stat.Bsize)
 
-	// 空间不够压缩
 	if uint64(a.TotalSize)*3/2 > diskFree {
-		fmt.Println("  策略: direct（本地空间不足，无法压缩）")
+		fmt.Println(style.Warning("策略: direct（本地空间不足，无法压缩）"))
 		return "direct"
 	}
 
-	// 计算小文件占比
 	if a.FileCount > 0 {
 		ratio := float64(a.SmallFiles) / float64(a.FileCount)
-		// 小文件占比高且文件多 → 压缩
 		if ratio > 0.7 && a.FileCount > 50 {
-			fmt.Printf("  策略: zip（小文件占比 %.0f%%，压缩减少请求）\n", ratio*100)
+			fmt.Printf("%s %.0f%%\n", style.OK.Render("策略: zip（小文件占比"), ratio*100)
 			return "zip"
 		}
 	}
 
-	// 默认直传，慢速上传
-	fmt.Println("  策略: direct（逐文件上传，自动限速避免限流）")
+	fmt.Println(style.InfoMsg("策略: direct（逐文件上传，自动限速避免限流）"))
 	return "direct"
 }
 
 // --- zip 上传 ---
 
-func createZip(srcDir, zipPath string) error {
+func createZip(srcDir, zipPath string, excludes []string) error {
 	zipFile, err := os.Create(zipPath)
 	if err != nil {
 		return err
@@ -172,7 +203,7 @@ func createZip(srcDir, zipPath string) error {
 	defer w.Close()
 
 	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil || info.IsDir() || isExcluded(path, excludes) {
 			return nil
 		}
 		relPath, _ := filepath.Rel(srcDir, path)
@@ -190,13 +221,13 @@ func createZip(srcDir, zipPath string) error {
 	})
 }
 
-func uploadAsZip(cfg *config.Config, repoID, remotePath, localDir string, a *dirAnalysis) error {
+func uploadAsZip(cfg *config.Config, repoID, remotePath, localDir string, a *dirAnalysis, excludes []string) error {
 	tmpZip := filepath.Join(os.TempDir(), "seaf-cli-upload.zip")
 	defer os.Remove(tmpZip)
 
 	fmt.Printf("压缩中: %s → ", formatSize(a.TotalSize))
 	start := time.Now()
-	if err := createZip(localDir, tmpZip); err != nil {
+	if err := createZip(localDir, tmpZip, excludes); err != nil {
 		return fmt.Errorf("压缩失败: %w", err)
 	}
 	zipInfo, _ := os.Stat(tmpZip)
@@ -207,7 +238,10 @@ func uploadAsZip(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 
 	// 上传 zip
 	zipName := filepath.Base(tmpZip)
-	remoteDir := "/" + remotePath
+	remoteDir := remotePath
+	if !strings.HasPrefix(remoteDir, "/") {
+		remoteDir = "/" + remoteDir
+	}
 	if err := createRemoteDir(cfg, repoID, remoteDir); err != nil {
 		fmt.Printf("创建目录: %v\n", err)
 	}
@@ -227,15 +261,19 @@ func uploadAsZip(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 
 // --- 直接上传 ---
 
-func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dirAnalysis) error {
-	remoteDir := "/" + remotePath
+func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dirAnalysis, excludes []string) error {
+	// remotePath 是库内路径，确保以 / 开头
+	remoteDir := remotePath
+	if !strings.HasPrefix(remoteDir, "/") {
+		remoteDir = "/" + remoteDir
+	}
 	if err := createRemoteDir(cfg, repoID, remoteDir); err != nil {
 		fmt.Printf("创建目录: %v\n", err)
 	}
 
 	var allFiles []string
 	filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil || info.IsDir() || isExcluded(path, excludes) {
 			return nil
 		}
 		allFiles = append(allFiles, path)
@@ -297,7 +335,7 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 			time.Sleep(1 * time.Second)
 		}
 
-		fmt.Printf("[%d/%d %.0f%%] %s\n", i+1, len(allFiles), percent, relPath)
+		fmt.Printf("%s %s\n", style.Progress.Render(fmt.Sprintf("[%d/%d %.0f%%]", i+1, len(allFiles), percent)), relPath)
 		if err := uploadFile(cfg, link, fileRemoteDir, localDir, filePath); err != nil {
 			// WAF 封禁检测
 			if isWafBlocked(err) {
@@ -328,7 +366,8 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 		}
 	}
 
-	fmt.Printf("\n完成: %d 成功, %d 跳过, %d 失败\n", success, skip, fail)
+	fmt.Printf("\n%s 成功: %d, 跳过: %d, 失败: %d\n",
+		style.Success("完成"), success, skip, fail)
 	return nil
 }
 
@@ -356,8 +395,13 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// 分离库名和库内路径
 	parts := strings.SplitN(remotePath, "/", 2)
 	repoName := parts[0]
+	repoPath := ""
+	if len(parts) > 1 {
+		repoPath = "/" + parts[1]
+	}
 
 	repoID, err := findRepoIDByName(cfg, repoName)
 	if err != nil {
@@ -365,35 +409,36 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	}
 
 	// 1. 分析
+	excludes := getExcludes()
 	fmt.Println("扫描目录...")
-	a := scanDir(localDir)
-	printAnalysis(a, localDir)
+	a := scanDir(localDir, excludes)
+	printAnalysis(a, localDir, excludes)
 
 	// 2. 选择策略
 	s := chooseStrategy(a)
 	fmt.Println()
 
-	// 3. 执行上传
+	// 3. 执行上传（repoPath 是库内路径，不含库名）
 	switch s {
 	case "zip":
-		return uploadAsZip(cfg, repoID, remotePath, localDir, a)
+		return uploadAsZip(cfg, repoID, repoPath, localDir, a, excludes)
 	default:
-		return uploadFiles(cfg, repoID, remotePath, localDir, a)
+		return uploadFiles(cfg, repoID, repoPath, localDir, a, excludes)
 	}
 }
 
 // --- 辅助函数 ---
 
 func createRemoteDir(cfg *config.Config, repoID, dir string) error {
+	// dir 是库内路径，如 "/2022方正字库/1.黑体"
+	if dir == "" || dir == "/" {
+		return nil
+	}
 	parts := strings.Split(strings.TrimPrefix(dir, "/"), "/")
 	current := ""
 	for _, part := range parts {
 		current += "/" + part
-		// 先检查目录是否已存在
-		if dirExists(cfg, repoID, current) {
-			continue
-		}
-		encodedDir := (&url.URL{Path: current}).String()
+		encodedDir := url.PathEscape(current)
 		client := &http.Client{Timeout: 15 * time.Second}
 		apiURL := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
 		req, _ := http.NewRequest("POST", apiURL, strings.NewReader("operation=mkdir"))
@@ -404,12 +449,13 @@ func createRemoteDir(cfg *config.Config, repoID, dir string) error {
 			return err
 		}
 		resp.Body.Close()
+		// 忽略错误（目录可能已存在，Seafile 会返回 400/409）
 	}
 	return nil
 }
 
 func dirExists(cfg *config.Config, repoID, dir string) bool {
-	encodedDir := (&url.URL{Path: dir}).String()
+	encodedDir := url.PathEscape(dir)
 	client := &http.Client{Timeout: 10 * time.Second}
 	apiURL := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
 	req, _ := http.NewRequest("GET", apiURL, nil)
@@ -423,9 +469,10 @@ func dirExists(cfg *config.Config, repoID, dir string) bool {
 }
 
 func listRemoteFiles(cfg *config.Config, repoID, dir string) (map[string]bool, error) {
+	encodedDir := url.PathEscape(dir)
 	client := &http.Client{Timeout: 30 * time.Second}
-	url := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, dir)
-	req, _ := http.NewRequest("GET", url, nil)
+	apiURL := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
+	req, _ := http.NewRequest("GET", apiURL, nil)
 	req.Header.Set("Authorization", "Token "+cfg.Token)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -456,9 +503,10 @@ func listRemoteFiles(cfg *config.Config, repoID, dir string) (map[string]bool, e
 }
 
 func getUploadLink(cfg *config.Config, repoID, dir string) (string, error) {
+	encodedDir := url.PathEscape(dir)
 	client := &http.Client{Timeout: 15 * time.Second}
-	url := fmt.Sprintf("%s/api2/repos/%s/upload-link/?p=%s", cfg.Server, repoID, dir)
-	req, _ := http.NewRequest("GET", url, nil)
+	apiURL := fmt.Sprintf("%s/api2/repos/%s/upload-link/?p=%s", cfg.Server, repoID, encodedDir)
+	req, _ := http.NewRequest("GET", apiURL, nil)
 	req.Header.Set("Authorization", "Token "+cfg.Token)
 	resp, err := client.Do(req)
 	if err != nil {
