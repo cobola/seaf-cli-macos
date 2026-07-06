@@ -46,14 +46,16 @@ sudo cp dist/bin/* /usr/local/bin/
 # 1. 启动守护进程
 seaf-cli start
 
-# 2. 登录（打开浏览器获取 token）
-seaf-cli login --web
+# 2. 登录
+seaf-cli login
+# 输入服务器地址: https://cloud.seafile.com
+# 输入邮箱和密码
 
 # 3. 查看资料库
 seaf-cli list
 
 # 4. 同步资料库到本地
-seaf-cli sync 公共软件 ~/SeafileData/公共软件
+seaf-cli sync 私人资料库 ~/SeafileData/私人资料库
 
 # 5. 查看同步状态
 seaf-cli status
@@ -96,7 +98,8 @@ seaf-cli login --web
 
 ```bash
 seaf-cli login
-# 依次输入：服务器地址、邮箱、密码
+# 输入服务器地址: https://cloud.seafile.com
+# 输入邮箱和密码
 ```
 
 ### JSON 文件导入
