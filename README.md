@@ -2,177 +2,183 @@
 
 macOS 命令行 Seafile 客户端，基于官方 seaf-daemon 块同步协议，不依赖 Python。
 
-## 安装
-
-### 方式一：下载预编译包（推荐）
-
-从 [GitHub Releases](https://github.com/cobola/seaf-cli-macos/releases) 下载：
+## 30 秒上手
 
 ```bash
-# Apple Silicon (M1/M2/M3)
-curl -L https://github.com/cobola/seaf-cli-macos/releases/latest/download/seaf-cli-macos-arm64.tar.gz -o seaf-cli.tar.gz
+# 1. 安装
+curl -L https://github.com/cobola/seaf-cli-macos/releases/latest/download/seaf-cli-macos-arm64.tar.gz | tar -xz
+sudo cp seaf-cli-macos-arm64/bin/* /usr/local/bin/
 
-# 解压
-tar -xzf seaf-cli.tar.gz
+# 2. 登录
+seaf-cli login
+# 按提示输入服务器地址、邮箱、密码
 
-# 安装到 /usr/local/bin（需要 sudo）
-sudo cp seaf-cli*/bin/* /usr/local/bin/
-
-# 或安装到用户目录（不需要 sudo）
-mkdir -p ~/.local/bin
-cp seaf-cli*/bin/* ~/.local/bin/
+# 3. 同步
+seaf-cli list          # 查看有哪些库
+seaf-cli sync 库名 ~/同步目录  # 开始同步
 ```
 
-### 方式二：源码编译
+## 安装
 
+### 下载预编译包（推荐）
+
+从 [GitHub Releases](https://github.com/cobola/seaf-cli-macos/releases) 下载最新版本。
+
+**Apple Silicon (M1/M2/M3/M4)：**
 ```bash
-# 安装依赖
+curl -L https://github.com/cobola/seaf-cli-macos/releases/latest/download/seaf-cli-macos-arm64.tar.gz -o seaf-cli.tar.gz
+tar -xzf seaf-cli.tar.gz
+sudo cp seaf-cli-macos-arm64/bin/* /usr/local/bin/
+```
+
+**Intel Mac：**
+```bash
+curl -L https://github.com/cobola/seaf-cli-macos/releases/latest/download/seaf-cli-macos-x86_64.tar.gz -o seaf-cli.tar.gz
+tar -xzf seaf-cli.tar.gz
+sudo cp seaf-cli-macos-x86_64/bin/* /usr/local/bin/
+```
+
+> 💡 如果不想用 sudo，可以安装到用户目录：
+> ```bash
+> mkdir -p ~/.local/bin
+> cp seaf-cli-macos-*/bin/* ~/.local/bin/
+> # 然后确保 ~/.local/bin 在 PATH 中
+> export PATH="$HOME/.local/bin:$PATH"
+> ```
+
+### 源码编译
+
+需要先安装编译依赖：
+```bash
 brew install autoconf automake libtool cmake pkg-config dylibbundler
 brew install glib openssl@3 libevent sqlite jansson python@3.9 vala
+```
 
-# 克隆并编译
+然后编译安装：
+```bash
 git clone https://github.com/cobola/seaf-cli-macos.git
 cd seaf-cli-macos
 chmod +x build.sh && ./build.sh
 chmod +x package.sh && ./package.sh
-
-# 安装
 sudo cp dist/bin/* /usr/local/bin/
 ```
 
-## 快速开始
+## 使用指南
+
+### 第一步：登录
 
 ```bash
-# 1. 启动守护进程
-seaf-cli start
-
-# 2. 登录
 seaf-cli login
-# 输入服务器地址: https://cloud.seafile.com
-# 输入邮箱和密码
+```
 
-# 3. 查看资料库
+按提示输入：
+- 服务器地址（如 `https://cloud.seafile.com`）
+- 邮箱
+- 密码
+
+> 💡 也可以用 token 登录：`seaf-cli login --web`
+
+### 第二步：查看资料库
+
+```bash
 seaf-cli list
+```
 
-# 4. 同步资料库到本地
+输出示例：
+```
+名称                 权限    大小       所有者
+─────────────────────────────────────────────
+私人资料库            rw     0 B       cobola
+工作文件              rw     1.2 GB    cobola
+```
+
+### 第三步：浏览文件
+
+```bash
+seaf-cli ls 私人资料库           # 查看根目录
+seaf-cli ls 私人资料库/文档      # 查看子目录
+```
+
+### 第四步：同步到本地
+
+```bash
 seaf-cli sync 私人资料库 ~/SeafileData/私人资料库
+```
 
-# 5. 查看同步状态
+查看同步状态：
+```bash
 seaf-cli status
+```
 
-# 6. 停止守护进程
+### 第五步：上传文件
+
+```bash
+# 上传整个目录
+seaf-cli upload ~/Documents/my-project 私人资料库/my-project
+
+# 上传时自动排除 .DS_Store 等系统文件
+seaf-cli upload ~/Documents/my-project 私人资料库/my-project
+```
+
+### 停止同步
+
+```bash
 seaf-cli stop
 ```
 
 ## 命令一览
 
-| 命令 | 说明 |
-|------|------|
-| `seaf-cli login --web` | 登录（浏览器获取 token） |
-| `seaf-cli login` | 账号密码登录 |
-| `seaf-cli logout` | 登出 |
-| `seaf-cli whoami` | 查看当前登录信息 |
-| `seaf-cli list` | 列出服务器所有资料库 |
-| `seaf-cli ls <库名> [路径]` | 列出资料库中的文件 |
-| `seaf-cli sync <库名> <本地目录>` | 同步资料库到本地 |
-| `seaf-cli upload <本地目录> <库内路径>` | 上传文件到服务器 |
-| `seaf-cli status` | 查看同步状态 |
-| `seaf-cli list-local` | 列出已同步的本地资料库 |
-| `seaf-cli start` | 启动 seaf-daemon |
-| `seaf-cli stop` | 停止 seaf-daemon |
-| `seaf-cli version` | 显示版本号 |
+| 命令 | 说明 | 示例 |
+|------|------|------|
+| `seaf-cli login` | 登录 | `seaf-cli login` |
+| `seaf-cli login --web` | Token 登录 | 适合 SSO/两步验证 |
+| `seaf-cli logout` | 登出 | |
+| `seaf-cli whoami` | 查看登录信息 | |
+| `seaf-cli list` | 列出所有资料库 | |
+| `seaf-cli ls <库> [路径]` | 浏览文件 | `seaf-cli ls 私人资料库/文档` |
+| `seaf-cli sync <库> <目录>` | 同步到本地 | `seaf-cli sync 私人资料库 ~/sync` |
+| `seaf-cli upload <本地> <远程>` | 上传文件 | `seaf-cli upload ./doc 私人资料库/doc` |
+| `seaf-cli status` | 查看同步状态 | |
+| `seaf-cli list-local` | 列出本地同步的库 | |
+| `seaf-cli start` | 启动守护进程 | |
+| `seaf-cli stop` | 停止守护进程 | |
+| `seaf-cli version` | 版本号 | |
 
-## 登录方式
+## 常见问题
 
-### Token 登录（推荐）
+### Q: 登录报错怎么办？
 
+确认服务器地址、邮箱、密码正确。如果是 SSO 登录，使用 `seaf-cli login --web`。
+
+### Q: 上传被限流？
+
+大文件上传可能触发服务器限流。使用 zip 策略：
 ```bash
-seaf-cli login --web
+seaf-cli upload ~/大目录 私人资料库/大目录 -s zip
 ```
 
-1. 终端输入服务器地址（如 `https://pan.hep.com.cn`）
-2. 浏览器自动打开服务器的 API Token 设置页
-3. 登录后生成 token，复制粘贴到终端
+### Q: 同步的文件在哪里？
 
-### 账号密码登录
-
+默认在 `~/SeafileData/` 目录下。查看同步状态：
 ```bash
-seaf-cli login
-# 输入服务器地址: https://cloud.seafile.com
-# 输入邮箱和密码
-```
-
-### JSON 文件导入
-
-```bash
-seaf-cli login --config config.json
-# 配置文件格式：{"server":"https://x.com","email":"a@b.com","token":"xxx"}
-```
-
-## 同步文件
-
-```bash
-# 同步整个资料库
-seaf-cli sync 公共软件 ~/SeafileData/公共软件
-
-# 查看同步状态
 seaf-cli status
-
-# 列出已同步的资料库
 seaf-cli list-local
 ```
 
-sync 命令通过 seaf-daemon 的块同步协议工作，不走 REST API，速度快且不会触发 WAF 限流。
-
-## 上传文件
+### Q: 如何停止同步？
 
 ```bash
-# 上传目录（自动选择策略）
-seaf-cli upload ~/Documents/my-project 公共软件/my-project
-
-# 强制 zip 压缩上传
-seaf-cli upload ~/Documents/my-project 公共软件/my-project -s zip
-
-# 强制逐文件上传
-seaf-cli upload ~/Documents/my-project 公共软件/my-project -s direct
+seaf-cli stop
 ```
 
-### 上传策略
-
-| 策略 | 说明 |
-|------|------|
-| `auto`（默认） | 根据文件数量和大小自动选择 |
-| `zip` | 先压缩再上传（适合大量小文件） |
-| `direct` | 逐文件直接上传（适合大文件） |
-
-### 排除文件
-
-默认排除 `.DS_Store`、`desktop.ini`、`Thumbs.db` 等系统文件：
-
-```bash
-seaf-cli upload ~/Documents/my-project 公共软件/my-project -e ".DS_Store,desktop.ini,*.tmp"
-```
-
-## 钥匙串集成
-
-登录时 token 自动存入 macOS Keychain，配置文件作备份。
-
-```bash
-seaf-cli whoami  # 查看登录信息（token 从钥匙串读取）
-```
-
-## 架构说明
+## 架构
 
 ```
 seaf-cli (Go)  ──RPC──>  seaf-daemon (C)  ──HTTP 块同步──>  Seafile 服务器
-     │                        │
-     ├─ 登录管理              ├─ 文件同步引擎
-     ├─ 资料库浏览            ├─ 块存储管理
-     └─ 配置管理              └─ 冲突处理
 ```
 
-- `seaf-cli`：Go 实现的命令行工具，负责登录、配置、API 查询、文件上传
-- `seaf-daemon`：C 实现的同步守护进程，负责文件同步
+- `seaf-cli`：命令行工具，负责登录、配置、API 查询、文件上传
+- `seaf-daemon`：同步守护进程，负责文件同步
 - 两者通过 Unix socket (searpc) 通信
 
 ## 协议
