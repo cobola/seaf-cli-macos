@@ -206,7 +206,11 @@ func createZip(srcDir, zipPath string, excludes []string) error {
 		if err != nil || info.IsDir() || isExcluded(path, excludes) {
 			return nil
 		}
+		// 路径穿越检查
 		relPath, _ := filepath.Rel(srcDir, path)
+		if strings.Contains(relPath, "..") {
+			return nil
+		}
 		f, err := w.Create(relPath)
 		if err != nil {
 			return err
@@ -222,7 +226,12 @@ func createZip(srcDir, zipPath string, excludes []string) error {
 }
 
 func uploadAsZip(cfg *config.Config, repoID, remotePath, localDir string, a *dirAnalysis, excludes []string) error {
-	tmpZip := filepath.Join(os.TempDir(), "seaf-cli-upload.zip")
+	tmpFile, err := os.CreateTemp("", "seaf-cli-upload-*.zip")
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	tmpZip := tmpFile.Name()
+	tmpFile.Close()
 	defer os.Remove(tmpZip)
 
 	fmt.Printf("压缩中: %s → ", formatSize(a.TotalSize))

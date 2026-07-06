@@ -93,7 +93,7 @@ func (c *Config) Load() error {
 // Save 保存配置到文件
 func (c *Config) Save() error {
 	configDir := c.GetConfigDir()
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return fmt.Errorf("创建配置目录失败: %w", err)
 	}
 	
@@ -106,7 +106,8 @@ func (c *Config) Save() error {
 	content.WriteString(fmt.Sprintf("token = %s\n", c.Token))
 	content.WriteString("\n")
 	
-	if err := os.WriteFile(configFile, []byte(content.String()), 0644); err != nil {
+	// 使用 0600 权限，只有当前用户可读写
+	if err := os.WriteFile(configFile, []byte(content.String()), 0600); err != nil {
 		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 	
