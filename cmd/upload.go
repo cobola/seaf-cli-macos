@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -137,7 +138,7 @@ func chooseStrategy(a *dirAnalysis) string {
 	syscall.Statfs(".", &stat)
 	diskFree := stat.Bavail * uint64(stat.Bsize)
 
-	// 空间不够压缩（需要约 1.5 倍空间）
+	// 空间不够压缩
 	if uint64(a.TotalSize)*3/2 > diskFree {
 		fmt.Println("  策略: direct（本地空间不足，无法压缩）")
 		return "direct"
@@ -146,13 +147,15 @@ func chooseStrategy(a *dirAnalysis) string {
 	// 计算小文件占比
 	if a.FileCount > 0 {
 		ratio := float64(a.SmallFiles) / float64(a.FileCount)
+		// 小文件占比高且文件多 → 压缩
 		if ratio > 0.7 && a.FileCount > 50 {
 			fmt.Printf("  策略: zip（小文件占比 %.0f%%，压缩减少请求）\n", ratio*100)
 			return "zip"
 		}
 	}
 
-	fmt.Println("  策略: direct（大文件为主，压缩无收益）")
+	// 默认直传，慢速上传
+	fmt.Println("  策略: direct（逐文件上传，自动限速避免限流）")
 	return "direct"
 }
 
@@ -230,7 +233,6 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 		fmt.Printf("创建目录: %v\n", err)
 	}
 
-	// 收集文件
 	var allFiles []string
 	filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
@@ -240,11 +242,11 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 		return nil
 	})
 
-	// 获取已存在文件
 	existingFiles, _ := listRemoteFiles(cfg, repoID, remoteDir)
 
 	linkCache := make(map[string]string)
 	success, skip, fail := 0, 0, 0
+	wafPause := false
 
 	for i, filePath := range allFiles {
 		relPath, _ := filepath.Rel(localDir, filePath)
@@ -266,26 +268,69 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 			var linkErr error
 			link, linkErr = getUploadLink(cfg, repoID, fileRemoteDir)
 			if linkErr != nil {
-				fmt.Printf("[%d/%d %.0f%%] %s\n  ✗ %v\n", i+1, len(allFiles), percent, relPath, linkErr)
-				fail++
-				continue
+				// WAF 封禁检测
+				if isWafBlocked(linkErr) {
+					fmt.Printf("\n⚠ 检测到限流，暂停 60 秒...\n")
+					time.Sleep(60 * time.Second)
+					wafPause = true
+					link, linkErr = getUploadLink(cfg, repoID, fileRemoteDir)
+					if linkErr != nil {
+						fmt.Printf("[%d/%d %.0f%%] %s\n  ✗ %v\n", i+1, len(allFiles), percent, relPath, linkErr)
+						fail++
+						continue
+					}
+				} else {
+					fmt.Printf("[%d/%d %.0f%%] %s\n  ✗ %v\n", i+1, len(allFiles), percent, relPath, linkErr)
+					fail++
+					continue
+				}
 			}
 			linkCache[fileRemoteDir] = link
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 		}
 
 		fmt.Printf("[%d/%d %.0f%%] %s\n", i+1, len(allFiles), percent, relPath)
 		if err := uploadFile(cfg, link, fileRemoteDir, localDir, filePath); err != nil {
-			fmt.Printf("  ✗ %v\n", err)
-			fail++
+			// WAF 封禁检测
+			if isWafBlocked(err) {
+				fmt.Printf("\n⚠ 检测到限流，暂停 60 秒...\n")
+				time.Sleep(60 * time.Second)
+				wafPause = true
+				// 重试
+				if err := uploadFile(cfg, link, fileRemoteDir, localDir, filePath); err != nil {
+					fmt.Printf("  ✗ %v\n", err)
+					fail++
+				} else {
+					success++
+				}
+			} else {
+				fmt.Printf("  ✗ %v\n", err)
+				fail++
+			}
 		} else {
 			success++
+			wafPause = false
 		}
-		time.Sleep(300 * time.Millisecond)
+
+		// 根据是否刚暂停过调整延迟
+		if wafPause {
+			time.Sleep(2 * time.Second)
+		} else {
+			time.Sleep(1 * time.Second)
+		}
 	}
 
 	fmt.Printf("\n完成: %d 成功, %d 跳过, %d 失败\n", success, skip, fail)
 	return nil
+}
+
+func isWafBlocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "405") || strings.Contains(msg, "429") ||
+		strings.Contains(msg, "blocked") || strings.Contains(msg, "WAF")
 }
 
 // --- 入口 ---
@@ -332,14 +377,14 @@ func runUpload(cmd *cobra.Command, args []string) error {
 // --- 辅助函数 ---
 
 func createRemoteDir(cfg *config.Config, repoID, dir string) error {
-	// 递归创建父目录
 	parts := strings.Split(strings.TrimPrefix(dir, "/"), "/")
 	current := ""
 	for _, part := range parts {
 		current += "/" + part
+		encodedDir := (&url.URL{Path: current}).String()
 		client := &http.Client{Timeout: 15 * time.Second}
-		url := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, current)
-		req, _ := http.NewRequest("POST", url, strings.NewReader("operation=mkdir"))
+		apiURL := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
+		req, _ := http.NewRequest("POST", apiURL, strings.NewReader("operation=mkdir"))
 		req.Header.Set("Authorization", "Token "+cfg.Token)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		resp, err := client.Do(req)
@@ -347,7 +392,6 @@ func createRemoteDir(cfg *config.Config, repoID, dir string) error {
 			return err
 		}
 		resp.Body.Close()
-		// 忽略已存在的错误
 	}
 	return nil
 }
