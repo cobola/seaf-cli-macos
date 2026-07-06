@@ -297,6 +297,7 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 
 	// 递归获取已存在文件（相对路径 -> size）
 	existingFiles := make(map[string]int64)
+	scanCount := 0
 	var checkDir func(dir string)
 	checkDir = func(dir string) {
 		encodedDir := url.PathEscape(dir)
@@ -325,12 +326,19 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 			}
 			if e.Type == "file" {
 				existingFiles[rel] = e.Size
+				scanCount++
+				if scanCount%50 == 0 {
+					fmt.Printf("\r  扫描中... 已发现 %d 个文件", scanCount)
+				}
 			} else if e.Type == "dir" {
 				checkDir(dir + "/" + e.Name)
 			}
 		}
 	}
 	checkDir(remoteDir)
+	if scanCount > 0 {
+		fmt.Printf("\r  扫描完成，发现 %d 个已上传文件\n", scanCount)
+	}
 	fmt.Printf("  服务器已有 %d 个文件\n", len(existingFiles))
 
 	linkCache := make(map[string]string)
@@ -341,8 +349,10 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 	// 快速列出已跳过的文件（不请求 API）
 	if len(existingFiles) > 0 {
 		fmt.Printf("\n%s 已跳过 %d 个文件：\n", style.Success("✓"), len(existingFiles))
+		skipIdx := 0
 		for name := range existingFiles {
-			fmt.Printf("  ⏭ %s\n", name)
+			skipIdx++
+			fmt.Printf("  ⏭ [%d] %s\n", skipIdx, name)
 		}
 		fmt.Println()
 	}
