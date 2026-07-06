@@ -165,6 +165,12 @@ func printAnalysis(a *dirAnalysis, localDir string, excludes []string) {
 // --- 策略选择 ---
 
 func chooseStrategy(a *dirAnalysis) string {
+	// 校验策略参数
+	if strategy != "auto" && strategy != "zip" && strategy != "direct" {
+		fmt.Println(style.Warning(fmt.Sprintf("未知策略 '%s'，使用 auto", strategy)))
+		strategy = "auto"
+	}
+
 	if strategy != "auto" {
 		return strategy
 	}
@@ -293,7 +299,8 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 
 	linkCache := make(map[string]string)
 	success, skip, fail := 0, 0, 0
-	wafPause := false
+	wafRetries := 0
+	maxRetries := 3
 
 	for i, filePath := range allFiles {
 		relPath, _ := filepath.Rel(localDir, filePath)
@@ -324,10 +331,14 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 			link, linkErr = getUploadLink(cfg, repoID, fileRemoteDir)
 			if linkErr != nil {
 				// WAF 封禁检测
-				if isWafBlocked(linkErr) {
-					fmt.Printf("\n⚠ 检测到限流，暂停 60 秒...\n")
-					time.Sleep(60 * time.Second)
-					wafPause = true
+				if isWafBlocked(linkErr) && wafRetries < maxRetries {
+					delay := time.Duration(30*(1<<uint(wafRetries))) * time.Second
+					if delay > 5*time.Minute {
+						delay = 5 * time.Minute
+					}
+					fmt.Printf("\n%s 等待 %v...\n", style.Warning("检测到限流"), delay)
+					time.Sleep(delay)
+					wafRetries++
 					link, linkErr = getUploadLink(cfg, repoID, fileRemoteDir)
 					if linkErr != nil {
 						fmt.Printf("[%d/%d %.0f%%] %s\n  ✗ %v\n", i+1, len(allFiles), percent, relPath, linkErr)
@@ -346,33 +357,37 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 
 		fmt.Printf("%s %s\n", style.Progress.Render(fmt.Sprintf("[%d/%d %.0f%%]", i+1, len(allFiles), percent)), relPath)
 		if err := uploadFile(cfg, link, fileRemoteDir, localDir, filePath); err != nil {
-			// WAF 封禁检测
-			if isWafBlocked(err) {
-				fmt.Printf("\n⚠ 检测到限流，暂停 60 秒...\n")
-				time.Sleep(60 * time.Second)
-				wafPause = true
+			// WAF 封禁检测 + 指数退避重试
+			if isWafBlocked(err) && wafRetries < maxRetries {
+				delay := time.Duration(30*(1<<uint(wafRetries))) * time.Second
+				if delay > 5*time.Minute {
+					delay = 5 * time.Minute
+				}
+				fmt.Printf("\n%s 等待 %v...\n", style.Warning("检测到限流"), delay)
+				time.Sleep(delay)
+				wafRetries++
 				// 重试
 				if err := uploadFile(cfg, link, fileRemoteDir, localDir, filePath); err != nil {
 					fmt.Printf("  ✗ %v\n", err)
 					fail++
 				} else {
 					success++
+					wafRetries = 0
 				}
+			} else if isWafBlocked(err) {
+				fmt.Printf("  ✗ 重试次数耗尽: %v\n", err)
+				fail++
 			} else {
 				fmt.Printf("  ✗ %v\n", err)
 				fail++
 			}
 		} else {
 			success++
-			wafPause = false
+			wafRetries = 0
 		}
 
-		// 根据是否刚暂停过调整延迟
-		if wafPause {
-			time.Sleep(2 * time.Second)
-		} else {
-			time.Sleep(1 * time.Second)
-		}
+		// 正常延迟
+		time.Sleep(1 * time.Second)
 	}
 
 	fmt.Printf("\n%s 成功: %d, 跳过: %d, 失败: %d\n",
@@ -387,6 +402,10 @@ func isWafBlocked(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "405") || strings.Contains(msg, "429") ||
 		strings.Contains(msg, "blocked") || strings.Contains(msg, "WAF")
+}
+
+func isRetryable(statusCode int) bool {
+	return statusCode == 429 || statusCode == 503 || statusCode == 502
 }
 
 // --- 入口 ---
