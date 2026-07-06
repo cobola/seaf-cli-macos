@@ -261,6 +261,14 @@ func uploadFiles(cfg *config.Config, repoID, remotePath, localDir string, a *dir
 		fileRemoteDir := remoteDir
 		if relDir != "." {
 			fileRemoteDir = remoteDir + "/" + filepath.ToSlash(relDir)
+			// 确保子目录存在
+			if !dirExists(cfg, repoID, fileRemoteDir) {
+				if err := createRemoteDir(cfg, repoID, fileRemoteDir); err != nil {
+					fmt.Printf("[%d/%d %.0f%%] %s\n  ✗ 创建目录失败: %v\n", i+1, len(allFiles), percent, relPath, err)
+					fail++
+					continue
+				}
+			}
 		}
 
 		link, ok := linkCache[fileRemoteDir]
@@ -381,6 +389,10 @@ func createRemoteDir(cfg *config.Config, repoID, dir string) error {
 	current := ""
 	for _, part := range parts {
 		current += "/" + part
+		// 先检查目录是否已存在
+		if dirExists(cfg, repoID, current) {
+			continue
+		}
 		encodedDir := (&url.URL{Path: current}).String()
 		client := &http.Client{Timeout: 15 * time.Second}
 		apiURL := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
@@ -394,6 +406,20 @@ func createRemoteDir(cfg *config.Config, repoID, dir string) error {
 		resp.Body.Close()
 	}
 	return nil
+}
+
+func dirExists(cfg *config.Config, repoID, dir string) bool {
+	encodedDir := (&url.URL{Path: dir}).String()
+	client := &http.Client{Timeout: 10 * time.Second}
+	apiURL := fmt.Sprintf("%s/api2/repos/%s/dir/?p=%s", cfg.Server, repoID, encodedDir)
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	req.Header.Set("Authorization", "Token "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 func listRemoteFiles(cfg *config.Config, repoID, dir string) (map[string]bool, error) {
